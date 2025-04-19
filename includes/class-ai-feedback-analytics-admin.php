@@ -28,7 +28,26 @@ class AI_Feedback_Analytics_Admin {
      * @var AI_Feedback_Analytics_Export
      */
     private $export;
-    
+
+    /**
+     * Instance třídy
+     * 
+     * @var AI_Feedback_Analytics_Admin
+     */
+    private static $instance = null;
+
+    /**
+     * Získání instance třídy
+     * 
+     * @return AI_Feedback_Analytics_Admin
+     */
+    public static function get_instance() {
+        if (null === self::$instance) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
     /**
      * Inicializace třídy
      * 
@@ -51,15 +70,8 @@ class AI_Feedback_Analytics_Admin {
      * Registrace položky v admin menu
      */
     public function register_admin_menu() {
-        add_menu_page(
-            'AI Feedback Analytika',
-            'AI Analytika',
-            'manage_options',
-            'ai-feedback-analytics',
-            [$this, 'render_analytics_page'],
-            'dashicons-chart-bar',
-            30
-        );
+        // Hlavní menu je již vytvořeno v hlavním souboru pluginu
+        // Nepřidáváme podmenu, protože hlavní menu již používá stejný slug
     }
     
     /**
@@ -183,10 +195,17 @@ class AI_Feedback_Analytics_Admin {
                     
                     <?php submit_button('Filtrovat', 'secondary', 'filter', false); ?>
                     <button type="button" id="reset-filters" class="button button-secondary">Resetovat filtry</button>
+                    <button type="button" id="reanalyze-all" class="button button-primary">Spustit re-analýzu</button>
                 </form>
             </div>
 
             <div class="ai-feedback-notification"></div>
+            <div id="reanalyze-progress" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-bar-fill" style="width: 0%"></div>
+                </div>
+                <div class="progress-status">Zahajuji analýzu...</div>
+            </div>
 
             <div id="dashboard-widgets-wrap">
                 <div id="dashboard-widgets" class="metabox-holder">
@@ -257,45 +276,14 @@ class AI_Feedback_Analytics_Admin {
         ?>
         <div class="ai-feedback-topics">
             <div class="ai-feedback-chart-header">
-                <p>Analýza nejčastějších témat a konceptů v zápiscích účastníků.</p>
+                <p>Analýza poznámek účastníků vzdělávacího programu.</p>
                 <button type="button" class="button button-secondary ai-analyze-button" data-analysis="topics">
-                    <span class="dashicons dashicons-update"></span> Analyzovat témata
+                    <span class="dashicons dashicons-update"></span> Analyzovat
                 </button>
             </div>
             
-            <div class="ai-feedback-tabs">
-                <div class="ai-feedback-tab-nav">
-                    <span class="ai-feedback-tab-link active" data-tab="keywords">Klíčová slova</span>
-                    <span class="ai-feedback-tab-link" data-tab="topics">Kategorie témat</span>
-                    <span class="ai-feedback-tab-link" data-tab="usage">Plány využití</span>
-                </div>
-
-                <div class="ai-feedback-tab-content active" id="keywords-tab">
-                    <div class="ai-feedback-chart-container">
-                        <canvas id="keywordsChart"></canvas>
-                        <div id="keywords-loading" class="ai-loading-placeholder">
-                            <p>Klikněte na tlačítko "Analyzovat témata" pro zobrazení grafu klíčových slov.</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="ai-feedback-tab-content" id="topics-tab">
-                    <div class="ai-feedback-chart-container">
-                        <canvas id="topicsChart"></canvas>
-                        <div id="topics-loading" class="ai-loading-placeholder">
-                            <p>Klikněte na tlačítko "Analyzovat témata" pro zobrazení grafu kategorií témat.</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="ai-feedback-tab-content" id="usage-tab">
-                    <div class="ai-feedback-chart-container">
-                        <canvas id="usageChart"></canvas>
-                        <div id="usage-loading" class="ai-loading-placeholder">
-                            <p>Klikněte na tlačítko "Analyzovat témata" pro zobrazení grafu plánů využití.</p>
-                        </div>
-                    </div>
-                </div>
+            <div id="analysis-results">
+                <p class="ai-loading-placeholder">Klikněte na tlačítko "Analyzovat" pro zobrazení výsledků analýzy.</p>
             </div>
         </div>
         <?php
@@ -440,6 +428,268 @@ class AI_Feedback_Analytics_Admin {
                     <button type="submit" class="button">Generovat PDF</button>
                 </div>
             </form>
+        </div>
+        <?php
+    }
+    
+    /**
+     * Vykreslení stránky s logy
+     */
+    public function render_logs_page() {
+        // Kontrola oprávnění
+        if (!current_user_can('manage_options')) {
+            wp_die(__('Nemáte dostatečná oprávnění pro přístup na tuto stránku.'));
+        }
+        
+        // Získání logů
+        $logs = $this->api->get_api_logs();
+        $total_tokens = $this->api->get_total_tokens_used();
+        
+        ?>
+        <div class="wrap">
+            <h1>Logy API požadavků</h1>
+            
+            <div class="ai-feedback-logs-summary">
+                <h2>Souhrnné statistiky</h2>
+                <p>Celkový počet použitých tokenů: <strong><?php echo number_format($total_tokens); ?></strong></p>
+                
+                <div class="ai-feedback-reanalyze">
+                    <button type="button" class="button button-primary" id="reanalyze-all">
+                        <span class="dashicons dashicons-update"></span> Znovu analyzovat všechny příspěvky
+                    </button>
+                    <div id="reanalyze-progress" style="display: none;">
+                        <p>Probíhá analýza... <span id="reanalyze-status"></span></p>
+                        <div class="progress-bar">
+                            <div class="progress-bar-fill"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Typ požadavku</th>
+                        <th>Datum</th>
+                        <th>Počet tokenů</th>
+                        <th>Doba zpracování</th>
+                        <th>Stav</th>
+                        <th>Akce</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($logs as $log): ?>
+                        <tr>
+                            <td><?php echo esc_html($log->id); ?></td>
+                            <td><?php echo esc_html($log->request_type); ?></td>
+                            <td><?php echo esc_html($log->created_at); ?></td>
+                            <td><?php echo esc_html($log->tokens_used); ?></td>
+                            <td><?php echo esc_html(number_format($log->execution_time, 2)); ?>s</td>
+                            <td>
+                                <?php if (empty($log->error_message)): ?>
+                                    <span class="dashicons dashicons-yes" style="color: green;"></span> Úspěšné
+                                <?php else: ?>
+                                    <span class="dashicons dashicons-no" style="color: red;"></span> Chyba
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <button type="button" class="button button-small view-log-details" data-log-id="<?php echo esc_attr($log->id); ?>">
+                                    Zobrazit detaily
+                                </button>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+            
+            <!-- Modal pro zobrazení detailů logu -->
+            <div id="log-details-modal" class="ai-feedback-modal" style="display: none;">
+                <div class="ai-feedback-modal-content">
+                    <span class="ai-feedback-modal-close">&times;</span>
+                    <h2>Detaily logu</h2>
+                    <div class="ai-feedback-modal-body">
+                        <h3>Požadavek</h3>
+                        <pre class="ai-feedback-log-data"></pre>
+                        
+                        <h3>Odpověď</h3>
+                        <pre class="ai-feedback-log-response"></pre>
+                        
+                        <?php if (!empty($log->error_message)): ?>
+                            <h3>Chyba</h3>
+                            <pre class="ai-feedback-log-error"></pre>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            
+            <style>
+                .ai-feedback-logs-summary {
+                    background: #fff;
+                    padding: 20px;
+                    margin-bottom: 20px;
+                    border-radius: 4px;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                }
+                
+                .ai-feedback-modal {
+                    display: none;
+                    position: fixed;
+                    z-index: 1000;
+                    left: 0;
+                    top: 0;
+                    width: 100%;
+                    height: 100%;
+                    background-color: rgba(0,0,0,0.5);
+                }
+                
+                .ai-feedback-modal-content {
+                    background-color: #fff;
+                    margin: 5% auto;
+                    padding: 20px;
+                    width: 80%;
+                    max-width: 800px;
+                    border-radius: 4px;
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                }
+                
+                .ai-feedback-modal-close {
+                    color: #aaa;
+                    float: right;
+                    font-size: 28px;
+                    font-weight: bold;
+                    cursor: pointer;
+                }
+                
+                .ai-feedback-modal-close:hover {
+                    color: #000;
+                }
+                
+                .ai-feedback-modal-body {
+                    margin-top: 20px;
+                }
+                
+                .ai-feedback-modal-body pre {
+                    background: #f5f5f5;
+                    padding: 10px;
+                    border-radius: 4px;
+                    overflow-x: auto;
+                }
+                
+                .ai-feedback-reanalyze {
+                    margin-top: 20px;
+                    padding-top: 20px;
+                    border-top: 1px solid #ddd;
+                }
+                
+                .progress-bar {
+                    width: 100%;
+                    height: 20px;
+                    background-color: #f0f0f0;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    margin-top: 10px;
+                }
+                
+                .progress-bar-fill {
+                    height: 100%;
+                    background-color: #0073aa;
+                    width: 0%;
+                    transition: width 0.3s ease;
+                }
+            </style>
+            
+            <script>
+                // Define ajaxurl if it's not already defined
+                if (typeof ajaxurl === 'undefined') {
+                    var ajaxurl = '<?php echo admin_url('admin-ajax.php'); ?>';
+                }
+                
+                jQuery(document).ready(function($) {
+                    $('.view-log-details').on('click', function() {
+                        var logId = $(this).data('log-id');
+                        
+                        // Zobrazení modálního okna
+                        $('#log-details-modal').show();
+                        
+                        // Načtení detailů logu
+                        $.ajax({
+                            url: ajaxurl,
+                            type: 'POST',
+                            data: {
+                                action: 'ai_feedback_get_log_details',
+                                nonce: '<?php echo wp_create_nonce('ai_feedback_analytics_nonce'); ?>',
+                                log_id: logId
+                            },
+                            success: function(response) {
+                                if (response.success) {
+                                    $('.ai-feedback-log-data').text(JSON.stringify(response.data.request_data, null, 2));
+                                    $('.ai-feedback-log-response').text(JSON.stringify(response.data.response_data, null, 2));
+                                    if (response.data.error_message) {
+                                        $('.ai-feedback-log-error').text(response.data.error_message);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                    
+                    $('.ai-feedback-modal-close').on('click', function() {
+                        $('#log-details-modal').hide();
+                    });
+                    
+                    $(window).on('click', function(event) {
+                        if ($(event.target).is('#log-details-modal')) {
+                            $('#log-details-modal').hide();
+                        }
+                    });
+                    
+                    $('#reanalyze-all').on('click', function() {
+                        var $button = $(this);
+                        var $progress = $('#reanalyze-progress');
+                        var $status = $('#reanalyze-status');
+                        var $progressBar = $('.progress-bar-fill');
+                        
+                        $button.prop('disabled', true);
+                        $progress.show();
+                        $status.text('Připravuji analýzu...');
+                        $progressBar.css('width', '0%');
+                        
+                        $.ajax({
+                            url: ajaxurl,
+                            type: 'POST',
+                            data: {
+                                action: 'reanalyze_all_posts',
+                                nonce: '<?php echo wp_create_nonce('ai_feedback_analytics_nonce'); ?>'
+                            },
+                            success: function(response) {
+                                if (response.success) {
+                                    $status.text('Analýza dokončena!');
+                                    $progressBar.css('width', '100%');
+                                    
+                                    if (response.data.errors > 0) {
+                                        alert('Analýza dokončena s chybami:\n\n' + response.data.error_messages.join('\n'));
+                                    } else {
+                                        alert('Analýza úspěšně dokončena!');
+                                    }
+                                    
+                                    // Obnovení stránky po 2 sekundách
+                                    setTimeout(function() {
+                                        location.reload();
+                                    }, 2000);
+                                } else {
+                                    $status.text('Chyba při analýze!');
+                                    alert('Chyba při analýze: ' + response.data.message);
+                                }
+                            },
+                            error: function(xhr, status, error) {
+                                console.error('AJAX error:', xhr.responseText);
+                                $status.text('Chyba při komunikaci se serverem!');
+                                alert('Chyba při komunikaci se serverem: ' + error);
+                            }
+                        });
+                    });
+                });
+            </script>
         </div>
         <?php
     }

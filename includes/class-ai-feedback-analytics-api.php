@@ -9,6 +9,17 @@ defined('ABSPATH') || exit;
 
 class AI_Feedback_Analytics_API {
     /**
+     * Instance třídy (Singleton pattern)
+     * 
+     * @var AI_Feedback_Analytics_API
+     */
+    private static $instance = null;
+    
+    private $api_key;
+    private $model;
+    private $endpoint = 'https://api.openai.com/v1/chat/completions';
+    
+    /**
      * Instance třídy data
      * 
      * @var AI_Feedback_Analytics_Data
@@ -23,6 +34,26 @@ class AI_Feedback_Analytics_API {
     private $log_table;
     
     /**
+     * Konstruktor třídy
+     */
+    public function __construct() {
+        $this->api_key = get_option('ai_plugin_apikey');
+        $this->model = get_option('ai_plugin_model', 'gpt-4');
+    }
+
+    /**
+     * Získání instance třídy (Singleton pattern)
+     * 
+     * @return AI_Feedback_Analytics_API
+     */
+    public static function get_instance() {
+        if (null === self::$instance) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+    
+    /**
      * Inicializace třídy
      * 
      * @param AI_Feedback_Analytics_Data $data Instance třídy data
@@ -35,6 +66,122 @@ class AI_Feedback_Analytics_API {
         
         // Vytvoření log tabulky, pokud neexistuje
         $this->create_log_table();
+    }
+    
+    /**
+     * Ověření platnosti API klíče pomocí jednoduchého dotazu
+     * 
+     * @return bool True, pokud je API klíč platný, jinak false
+     */
+    public function is_api_key_valid() {
+        if (empty($this->api_key)) {
+            return false;
+        }
+        
+        // Kontrola, zda je model nastaven
+        if (empty($this->model)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'api_key_validation',
+                'error_message' => 'Není nastaven model pro OpenAI API',
+                'execution_time' => 0
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        // Příprava velmi jednoduchého dotazu pro ověření klíče
+        $request_body = [
+            'model' => $this->model,
+            'messages' => [
+                ['role' => 'system', 'content' => 'Respond with only the text "VALID".'],
+                ['role' => 'user', 'content' => 'API key test']
+            ],
+            'max_tokens' => 10,
+            'temperature' => 0.1
+        ];
+        
+        // Volání OpenAI API
+        $start_time = microtime(true);
+        $response = wp_remote_post($this->endpoint, [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->api_key,
+                'Content-Type' => 'application/json'
+            ],
+            'body' => json_encode($request_body),
+            'timeout' => 10
+        ]);
+        $execution_time = microtime(true) - $start_time;
+        
+        // Kontrola odpovědi
+        if (is_wp_error($response)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'api_key_validation',
+                'error_message' => 'Chyba při komunikaci s OpenAI API: ' . $response->get_error_message(),
+                'execution_time' => $execution_time
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        $status_code = wp_remote_retrieve_response_code($response);
+        
+        // Kontrola stavového kódu
+        if ($status_code == 401) {
+            // Neplatný API klíč
+            $log_data = [
+                'request_type' => 'api_key_validation',
+                'error_message' => 'Neplatný API klíč (401 Unauthorized)',
+                'execution_time' => $execution_time
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        } elseif ($status_code == 429) {
+            // Překročení limitu požadavků
+            $log_data = [
+                'request_type' => 'api_key_validation',
+                'error_message' => 'Překročen limit požadavků (429 Too Many Requests)',
+                'execution_time' => $execution_time
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        } elseif ($status_code < 200 || $status_code >= 300) {
+            // Jiná chyba
+            $body = wp_remote_retrieve_body($response);
+            $log_data = [
+                'request_type' => 'api_key_validation',
+                'error_message' => "Chyba API: HTTP kód $status_code. Odpověď: $body",
+                'execution_time' => $execution_time
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        // Kontrola obsahu odpovědi
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        
+        if (empty($body) || !isset($body['choices'][0]['message']['content'])) {
+            $log_data = [
+                'request_type' => 'api_key_validation',
+                'error_message' => 'Neplatná odpověď od API: ' . wp_remote_retrieve_body($response),
+                'execution_time' => $execution_time
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        // Logování úspěšného požadavku
+        $log_data = [
+            'request_type' => 'api_key_validation',
+            'response_data' => wp_remote_retrieve_body($response),
+            'tokens_used' => $body['usage']['total_tokens'] ?? 0,
+            'execution_time' => $execution_time
+        ];
+        $this->log_api_request($log_data);
+        
+        // Pokud prošlo až sem, API klíč je pravděpodobně platný
+        return true;
     }
     
     /**
@@ -65,53 +212,169 @@ class AI_Feedback_Analytics_API {
      * Analýza témat pomocí GPT-4.1
      * 
      * @param array $entries Zápisky k analýze
-     * @return array Data pro grafy
+     * @return array|bool Data pro grafy nebo false při chybě
      */
     public function analyze_topics($entries) {
-        // Pokud používáme testovací data nebo nemáme skutečné zápisky
-        if (count($entries) <= 2) {
-            // Vrátit testovací výsledky analýzy
-            return [
-                'keywords' => [
-                    'labels' => ['AI', 'GPT-4', 'prompt engineering', 'DALL-E', 'ChatGPT', 'Midjourney', 'workflow', 'automatizace', 'generování obrázků', 'large language model'],
-                    'values' => [15, 12, 10, 8, 7, 6, 5, 4, 4, 3]
-                ],
-                'topics' => [
-                    'labels' => ['Generativní AI', 'Praktické aplikace', 'Prompt engineering', 'Etika v AI', 'Technická implementace', 'Jiné'],
-                    'values' => [42, 28, 15, 10, 8, 3]
-                ],
-                'usage' => [
-                    'labels' => ['Marketing', 'Vývoj produktů', 'Copywriting', 'Analýza dat', 'Osobní projekty'],
-                    'values' => [35, 25, 20, 15, 5]
-                ]
+        // Kontrola, zda máme zápisky k analýze
+        if (empty($entries)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_topics',
+                'error_message' => 'Prázdná data pro analýzu',
+                'execution_time' => 0
             ];
+            $this->log_api_request($log_data);
+            return false;
         }
         
-        // Analýza dat pomocí GPT-4.1
-        $analysis_result = $this->analyze_entries_with_gpt($entries, 'topics');
-        
-        // Pokud analýza selhala, vrátíme testovací data
-        if (empty($analysis_result)) {
-            return [
-                'keywords' => [
-                    'labels' => ['AI', 'GPT-4', 'prompt engineering', 'DALL-E', 'ChatGPT', 'Midjourney', 'workflow', 'automatizace', 'generování obrázků', 'large language model'],
-                    'values' => [15, 12, 10, 8, 7, 6, 5, 4, 4, 3]
-                ],
-                'topics' => [
-                    'labels' => ['Generativní AI', 'Praktické aplikace', 'Prompt engineering', 'Etika v AI', 'Technická implementace', 'Jiné'],
-                    'values' => [42, 28, 15, 10, 8, 3]
-                ],
-                'usage' => [
-                    'labels' => ['Marketing', 'Vývoj produktů', 'Copywriting', 'Analýza dat', 'Osobní projekty'],
-                    'values' => [35, 25, 20, 15, 5]
-                ]
+        // Kontrola API klíče
+        if (empty($this->api_key)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_topics',
+                'error_message' => 'Chybí API klíč',
+                'execution_time' => 0
             ];
+            $this->log_api_request($log_data);
+            return false;
         }
+        
+        // Kontrola platnosti API klíče
+        if (!$this->is_api_key_valid()) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_topics',
+                'error_message' => 'Neplatný API klíč',
+                'execution_time' => 0
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        // Příprava dat pro GPT
+        $entries_json = json_encode($entries, JSON_UNESCAPED_UNICODE);
+        
+        // Vytvoření promptu
+        $system_prompt = "Jsi asistent, který analyzuje poznámky účastníků vzdělávacího programu. Tvým úkolem je identifikovat klíčová slova, kategorie témat a plány využití. Analýza musí být strukturovaná do následujících sekcí:
+1. Klíčová slova (10 nejčastějších)
+2. Témata (6 nejčastějších)
+3. Plány využití (5 nejčastějších)
+
+Formát odpovědi:
+```json
+{
+  \"keywords\": {\"slovo1\": počet, \"slovo2\": počet, ...},
+  \"topics\": {\"téma1\": počet, \"téma2\": počet, ...},
+  \"usage_plans\": {\"plán1\": počet, \"plán2\": počet, ...}
+}
+```
+
+Poskytni co nejlepší analýzu na základě dostupných dat. Všechny sekce jsou povinné.";
+
+        // Uživatelská zpráva s daty
+        $user_prompt = "Zde jsou poznámky účastníků k analýze (ve formátu JSON): $entries_json";
+        
+        // Příprava request body
+        $request_body = [
+            'model' => $this->model,
+            'messages' => [
+                ['role' => 'system', 'content' => $system_prompt],
+                ['role' => 'user', 'content' => $user_prompt]
+            ],
+            'max_tokens' => 1500,
+            'temperature' => 0.2,
+            'response_format' => ['type' => 'json_object']
+        ];
+        
+        // Začátek měření času
+        $start_time = microtime(true);
+        
+        // Příprava log dat pro request
+        $log_data = [
+            'request_type' => 'analyze_topics',
+            'request_data' => json_encode([
+                'entries_count' => count($entries),
+                'system_prompt' => $system_prompt,
+                'request_body' => $request_body
+            ])
+        ];
+        
+        // Volání OpenAI API
+        $response = wp_remote_post($this->endpoint, [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->api_key,
+                'Content-Type' => 'application/json'
+            ],
+            'body' => json_encode($request_body),
+            'timeout' => 60
+        ]);
+        
+        // Konec měření času
+        $execution_time = microtime(true) - $start_time;
+        
+        // Podrobné logování požadavku a odpovědi
+        error_log('API REQUEST TO: ' . $this->endpoint);
+        error_log('API REQUEST BODY: ' . json_encode($request_body));
+        
+        // Zpracování odpovědi a logování
+        if (is_wp_error($response)) {
+            // Detailní logování chyby
+            error_log('API ERROR: ' . $response->get_error_message());
+            $log_data['error_message'] = $response->get_error_message();
+            $log_data['execution_time'] = $execution_time;
+            $this->log_api_request($log_data);
+            
+            return false;
+        }
+        
+        // Logování HTTP status kódu
+        $status_code = wp_remote_retrieve_response_code($response);
+        error_log('API RESPONSE CODE: ' . $status_code);
+        
+        // Podrobné logování odpovědi body
+        $response_body = wp_remote_retrieve_body($response);
+        error_log('API RESPONSE BODY: ' . $response_body);
+        
+        $body = json_decode($response_body, true);
+        
+        if (empty($body['choices'][0]['message']['content'])) {
+            // Logování chyby
+            $log_data['error_message'] = 'Prázdná odpověď od API';
+            $log_data['response_data'] = json_encode($body);
+            $log_data['execution_time'] = $execution_time;
+            $this->log_api_request($log_data);
+            
+            return false;
+        }
+        
+        // Extrakce a logování tokenů
+        $tokens_used = $body['usage']['total_tokens'] ?? 0;
+        
+        // Dekódování JSON odpovědi
+        $analysis_json = $body['choices'][0]['message']['content'];
+        $analysis_data = json_decode($analysis_json, true);
+        
+        if (empty($analysis_data) || !is_array($analysis_data)) {
+            // Logování chyby
+            $log_data['error_message'] = 'Neplatný JSON v odpovědi';
+            $log_data['response_data'] = $analysis_json;
+            $log_data['tokens_used'] = $tokens_used;
+            $log_data['execution_time'] = $execution_time;
+            $this->log_api_request($log_data);
+            
+            return false;
+        }
+        
+        // Logování úspěšného požadavku
+        $log_data['response_data'] = $analysis_json;
+        $log_data['tokens_used'] = $tokens_used;
+        $log_data['execution_time'] = $execution_time;
+        $this->log_api_request($log_data);
         
         // Extrakce dat z analýzy
-        $keywords = $analysis_result['data']['keywords'] ?? [];
-        $topics = $analysis_result['data']['topics'] ?? [];
-        $usage = $analysis_result['data']['usage_plans'] ?? [];
+        $keywords = $analysis_data['keywords'] ?? [];
+        $topics = $analysis_data['topics'] ?? [];
+        $usage = $analysis_data['usage_plans'] ?? [];
         
         // Příprava dat pro grafy
         $keyword_labels = array_keys($keywords);
@@ -143,51 +406,50 @@ class AI_Feedback_Analytics_API {
      * Analýza porozumění pomocí GPT-4.1
      * 
      * @param array $entries Zápisky k analýze
-     * @return array Data pro grafy
+     * @return array|bool Data pro grafy nebo false při chybě
      */
     public function analyze_understanding($entries) {
-        // Pokud používáme testovací data nebo nemáme skutečné zápisky
-        if (count($entries) <= 2) {
-            // Vrátit testovací výsledky analýzy
-            return [
-                'understanding' => [
-                    'labels' => ['Výborné porozumění', 'Dobré porozumění', 'Základní porozumění', 'Nedostatečné porozumění'],
-                    'values' => [35, 40, 20, 5]
-                ],
-                'application' => [
-                    'labels' => ['Vynikající aplikace', 'Dobrá aplikace', 'Základní aplikace', 'Slabá aplikace'],
-                    'values' => [30, 45, 20, 5]
-                ],
-                'suggestions' => [
-                    'Přidat více praktických cvičení pro lepší upevnění konceptů.',
-                    'Poskytnout více příkladů z reálného světa pro pochopení praktického využití.',
-                    'Zařadit krátké kvízy na konci každé části školení pro ověření porozumění.',
-                    'Rozdělit složitější témata na menší, lépe stravitelné části.'
-                ]
+        // Kontrola, zda máme zápisky k analýze
+        if (empty($entries)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_understanding',
+                'error_message' => 'Prázdná data pro analýzu',
+                'execution_time' => 0
             ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        // Kontrola platnosti API klíče
+        if (empty($this->api_key)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_understanding',
+                'error_message' => 'Chybí API klíč',
+                'execution_time' => 0
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        if (!$this->is_api_key_valid()) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_understanding',
+                'error_message' => 'Neplatný API klíč',
+                'execution_time' => 0
+            ];
+            $this->log_api_request($log_data);
+            return false;
         }
         
         // Analýza dat pomocí GPT-4.1
         $analysis_result = $this->analyze_entries_with_gpt($entries, 'understanding');
         
-        // Pokud analýza selhala, vrátíme testovací data
+        // Pokud analýza selhala, vrátíme false
         if (empty($analysis_result)) {
-            return [
-                'understanding' => [
-                    'labels' => ['Výborné porozumění', 'Dobré porozumění', 'Základní porozumění', 'Nedostatečné porozumění'],
-                    'values' => [35, 40, 20, 5]
-                ],
-                'application' => [
-                    'labels' => ['Vynikající aplikace', 'Dobrá aplikace', 'Základní aplikace', 'Slabá aplikace'],
-                    'values' => [30, 45, 20, 5]
-                ],
-                'suggestions' => [
-                    'Přidat více praktických cvičení pro lepší upevnění konceptů.',
-                    'Poskytnout více příkladů z reálného světa pro pochopení praktického využití.',
-                    'Zařadit krátké kvízy na konci každé části školení pro ověření porozumění.',
-                    'Rozdělit složitější témata na menší, lépe stravitelné části.'
-                ]
-            ];
+            return false;
         }
         
         // Extrakce dat z analýzy
@@ -219,47 +481,50 @@ class AI_Feedback_Analytics_API {
      * Analýza sentimentu referencí pomocí GPT-4.1
      * 
      * @param array $references Reference k analýze
-     * @return array Data pro grafy
+     * @return array|bool Data pro grafy nebo false při chybě
      */
     public function analyze_sentiment($references) {
-        // Pokud používáme testovací data nebo nemáme skutečné reference
-        if (count($references) <= 2) {
-            // Vrátit testovací výsledky analýzy
-            return [
-                'sentiment' => [
-                    'labels' => ['Pozitivní', 'Neutrální', 'Negativní'],
-                    'values' => [75, 20, 5]
-                ],
-                'aspects' => [
-                    ['name' => 'Praktické příklady', 'count' => 15],
-                    ['name' => 'Znalosti lektora', 'count' => 12],
-                    ['name' => 'Interaktivita', 'count' => 10],
-                    ['name' => 'Užitečnost', 'count' => 8],
-                    ['name' => 'Organizace školení', 'count' => 5],
-                    ['name' => 'Tempo výuky', 'count' => 3]
-                ]
+        // Kontrola, zda máme reference k analýze
+        if (empty($references)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_sentiment',
+                'error_message' => 'Prázdná data pro analýzu',
+                'execution_time' => 0
             ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        // Kontrola platnosti API klíče
+        if (empty($this->api_key)) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_sentiment',
+                'error_message' => 'Chybí API klíč',
+                'execution_time' => 0
+            ];
+            $this->log_api_request($log_data);
+            return false;
+        }
+        
+        if (!$this->is_api_key_valid()) {
+            // Logování chyby
+            $log_data = [
+                'request_type' => 'analyze_sentiment',
+                'error_message' => 'Neplatný API klíč',
+                'execution_time' => 0
+            ];
+            $this->log_api_request($log_data);
+            return false;
         }
         
         // Analýza dat pomocí GPT-4.1
         $analysis_result = $this->analyze_references_with_gpt($references);
         
-        // Pokud analýza selhala, vrátíme testovací data
+        // Pokud analýza selhala, vrátíme false
         if (empty($analysis_result)) {
-            return [
-                'sentiment' => [
-                    'labels' => ['Pozitivní', 'Neutrální', 'Negativní'],
-                    'values' => [75, 20, 5]
-                ],
-                'aspects' => [
-                    ['name' => 'Praktické příklady', 'count' => 15],
-                    ['name' => 'Znalosti lektora', 'count' => 12],
-                    ['name' => 'Interaktivita', 'count' => 10],
-                    ['name' => 'Užitečnost', 'count' => 8],
-                    ['name' => 'Organizace školení', 'count' => 5],
-                    ['name' => 'Tempo výuky', 'count' => 3]
-                ]
-            ];
+            return false;
         }
         
         // Extrakce dat z analýzy
@@ -304,32 +569,45 @@ class AI_Feedback_Analytics_API {
      * @return array|bool Výsledek analýzy nebo false při chybě
      */
     private function analyze_entries_with_gpt($entries, $analysis_type) {
-        $api_key = get_option('ai_plugin_apikey');
-        if (empty($api_key)) {
+        if (empty($this->api_key)) {
             return false;
         }
         
         // Příprava dat pro GPT
         $entries_json = json_encode($entries, JSON_UNESCAPED_UNICODE);
         
-        // Vytvoření promptu podle typu analýzy
-        if ($analysis_type === 'topics') {
-            $system_prompt = 'Analyzuj zápisky účastníků školení a identifikuj klíčová slova, kategorie témat a plány využití. Vrať výsledek pouze jako JSON ve formátu: {"keywords": {"slovo1": počet, "slovo2": počet, ...}, "topics": {"téma1": počet, "téma2": počet, ...}, "usage_plans": {"plán1": počet, "plán2": počet, ...}}. Počet by měl představovat četnost výskytu. Zahrň pouze 10 nejčastějších klíčových slov, 6 nejčastějších témat a 5 nejčastějších plánů využití.';
-        } else {
-            $system_prompt = 'Analyzuj zápisky účastníků školení a vyhodnoť úroveň porozumění a kvalitu praktických aplikací. Vrať výsledek pouze jako JSON ve formátu: {"understanding_levels": {"Výborné porozumění": počet, "Dobré porozumění": počet, "Základní porozumění": počet, "Nedostatečné porozumění": počet}, "application_quality": {"Vynikající aplikace": počet, "Dobrá aplikace": počet, "Základní aplikace": počet, "Slabá aplikace": počet}, "improvement_suggestions": ["návrh1", "návrh2", "návrh3", ...]}. Počet by měl představovat četnost výskytu. Zahrň 3-5 konkrétních návrhů pro zlepšení školení na základě analýzy zápisků.';
-        }
-        
-        $user_prompt = "Zápisky účastníků školení k analýze (formát JSON): $entries_json";
+        // Vytvoření promptu
+        $system_prompt = "Jsi asistent, který analyzuje poznámky účastníků vzdělávacího programu. Tvým úkolem je vytvořit ucelené shrnutí toho, co si účastníci odnesli ze školení. Shrnutí musí být strukturované do následujících sekcí:
+
+1. Celkové shrnutí (2-3 věty o hlavních tématech)
+2. Klíčové poznatky (3-5 nejčastěji zmiňovaných nových poznatků)
+3. Porozumění (jak účastníci vysvětlují nové poznatky)
+4. Plány využití (jak chtějí účastníci nové poznatky využít)
+
+Formát odpovědi:
+```json
+{
+  \"summary\": \"text celkového shrnutí\",
+  \"key_learnings\": [\"poznatek 1\", \"poznatek 2\", ...],
+  \"understanding\": [\"vysvětlení 1\", \"vysvětlení 2\", ...],
+  \"usage_plans\": [\"plán 1\", \"plán 2\", ...]
+}
+```
+
+Poskytni co nejlepší analýzu na základě dostupných dat. Všechny sekce jsou povinné.";
+
+        // Uživatelská zpráva s daty
+        $user_prompt = "Zde jsou poznámky účastníků ze školení (ve formátu JSON): $entries_json";
         
         // Příprava request body
         $request_body = [
-            'model' => 'gpt-4.1',
+            'model' => $this->model,
             'messages' => [
                 ['role' => 'system', 'content' => $system_prompt],
                 ['role' => 'user', 'content' => $user_prompt]
             ],
-            'max_tokens' => 2000,
-            'temperature' => 0.5,
+            'max_tokens' => 1500,
+            'temperature' => 0.2,
             'response_format' => ['type' => 'json_object']
         ];
         
@@ -347,59 +625,60 @@ class AI_Feedback_Analytics_API {
         ];
         
         // Volání OpenAI API
-        $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
+        $response = wp_remote_post($this->endpoint, [
             'headers' => [
-                'Authorization' => 'Bearer ' . $api_key,
+                'Authorization' => 'Bearer ' . $this->api_key,
                 'Content-Type' => 'application/json'
             ],
             'body' => json_encode($request_body),
-            'timeout' => 60 // Delší timeout pro analýzu většího množství dat
+            'timeout' => 60
         ]);
         
         // Konec měření času
         $execution_time = microtime(true) - $start_time;
         
+        // Podrobné logování požadavku a odpovědi
+        error_log('API REQUEST TO: ' . $this->endpoint);
+        error_log('API REQUEST BODY: ' . json_encode($request_body));
+        
         // Zpracování odpovědi a logování
         if (is_wp_error($response)) {
-            // Logování chyby
+            error_log('API ERROR: ' . $response->get_error_message());
             $log_data['error_message'] = $response->get_error_message();
             $log_data['execution_time'] = $execution_time;
             $this->log_api_request($log_data);
-            
             return false;
         }
         
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $status_code = wp_remote_retrieve_response_code($response);
+        error_log('API RESPONSE CODE: ' . $status_code);
+        
+        $response_body = wp_remote_retrieve_body($response);
+        error_log('API RESPONSE BODY: ' . $response_body);
+        
+        $body = json_decode($response_body, true);
         
         if (empty($body['choices'][0]['message']['content'])) {
-            // Logování chyby
             $log_data['error_message'] = 'Prázdná odpověď od API';
             $log_data['response_data'] = json_encode($body);
             $log_data['execution_time'] = $execution_time;
             $this->log_api_request($log_data);
-            
             return false;
         }
         
-        // Extrakce a logování tokenů
         $tokens_used = $body['usage']['total_tokens'] ?? 0;
-        
-        // Dekódování JSON odpovědi
         $analysis_json = $body['choices'][0]['message']['content'];
         $analysis_data = json_decode($analysis_json, true);
         
         if (empty($analysis_data) || !is_array($analysis_data)) {
-            // Logování chyby
             $log_data['error_message'] = 'Neplatný JSON v odpovědi';
             $log_data['response_data'] = $analysis_json;
             $log_data['tokens_used'] = $tokens_used;
             $log_data['execution_time'] = $execution_time;
             $this->log_api_request($log_data);
-            
             return false;
         }
         
-        // Logování úspěšného požadavku
         $log_data['response_data'] = $analysis_json;
         $log_data['tokens_used'] = $tokens_used;
         $log_data['execution_time'] = $execution_time;
@@ -418,48 +697,69 @@ class AI_Feedback_Analytics_API {
      * @param array $references Reference k analýze
      * @return array|bool Výsledek analýzy nebo false při chybě
      */
-    private function analyze_references_with_gpt($references) {
-        $api_key = get_option('ai_plugin_apikey');
-        if (empty($api_key)) {
+    public function analyze_references_with_gpt($references) {
+        if (empty($this->api_key)) {
+            error_log('GPT API klíč není nastaven');
             return false;
         }
-        
+
+        // Pokud nejsou žádné záznamy, vrátíme prázdný výsledek
+        if (empty($references) || !is_array($references)) {
+            error_log('Žádné záznamy pro analýzu referencí');
+            return false;
+        }
+
         // Příprava dat pro GPT
-        $references_json = json_encode($references, JSON_UNESCAPED_UNICODE);
-        
-        // Vytvoření promptu
-        $system_prompt = 'Analyzuj reference účastníků školení a vyhodnoť sentiment a oceňované aspekty. Vrať výsledek pouze jako JSON ve formátu: {"sentiment": {"positive": počet, "neutral": počet, "negative": počet}, "appreciated_aspects": {"aspekt1": počet, "aspekt2": počet, ...}}. Počet by měl představovat četnost výskytu. Zahrň pouze 6 nejčastěji oceňovaných aspektů.';
-        $user_prompt = "Reference účastníků školení k analýze (formát JSON): $references_json";
-        
-        // Příprava request body
+        $entries_json = json_encode($references, JSON_UNESCAPED_UNICODE);
+
+        // Systémová instrukce pro GPT
+        $system_prompt = "Jsi asistent, který analyzuje poznámky účastníků vzdělávacího programu. Tvým úkolem je vytvořit ucelené shrnutí toho, co si účastníci odnesli jako nejcennější. Shrnutí musí být strukturované do následujících sekcí:
+1. Celkové shrnutí (2-3 věty)
+2. Hlavní přínosy (3-5 bodů)
+3. Zamýšlené aplikace (jak chtějí účastníci nabyté znalosti využít)
+4. Návrhy na zlepšení (pokud byly zmíněny)
+
+Formát odpovědi:
+```json
+{
+  \"summary\": \"text celkového shrnutí\",
+  \"benefits\": [\"přínos 1\", \"přínos 2\", ...],
+  \"applications\": [\"aplikace 1\", \"aplikace 2\", ...],
+  \"improvements\": [\"návrh 1\", \"návrh 2\", ...]
+}
+```
+
+Poskytni co nejlepší analýzu na základě dostupných dat. Všechny sekce jsou povinné kromě 'improvements', kterou vynech, pokud žádné návrhy na zlepšení nebyly zmíněny.";
+
+        // Uživatelská zpráva s daty
+        $user_prompt = "Zde jsou poznámky účastníků o tom, co si odnesli jako nejcennější ze školení (ve formátu JSON): $entries_json";
+
+        // Data pro API
         $request_body = [
-            'model' => 'gpt-4.1',
+            'model' => $this->model,
             'messages' => [
                 ['role' => 'system', 'content' => $system_prompt],
                 ['role' => 'user', 'content' => $user_prompt]
             ],
             'max_tokens' => 1500,
-            'temperature' => 0.5,
+            'temperature' => 0.2,
             'response_format' => ['type' => 'json_object']
         ];
-        
-        // Začátek měření času
-        $start_time = microtime(true);
-        
-        // Příprava log dat pro request
+
+        // Logování požadavku a měření času
         $log_data = [
+            'endpoint' => $this->endpoint,
+            'model' => $this->model,
             'request_type' => 'analyze_references',
-            'request_data' => json_encode([
-                'references_count' => count($references),
-                'system_prompt' => $system_prompt,
-                'request_body' => $request_body
-            ])
+            'input_tokens' => $this->estimate_tokens($system_prompt . $user_prompt)
         ];
         
+        $start_time = microtime(true);
+        
         // Volání OpenAI API
-        $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
+        $response = wp_remote_post($this->endpoint, [
             'headers' => [
-                'Authorization' => 'Bearer ' . $api_key,
+                'Authorization' => 'Bearer ' . $this->api_key,
                 'Content-Type' => 'application/json'
             ],
             'body' => json_encode($request_body),
@@ -469,9 +769,14 @@ class AI_Feedback_Analytics_API {
         // Konec měření času
         $execution_time = microtime(true) - $start_time;
         
+        // Podrobné logování požadavku a odpovědi
+        error_log('API REQUEST TO: ' . $this->endpoint);
+        error_log('API REQUEST BODY: ' . json_encode($request_body));
+        
         // Zpracování odpovědi a logování
         if (is_wp_error($response)) {
-            // Logování chyby
+            // Detailní logování chyby
+            error_log('API ERROR: ' . $response->get_error_message());
             $log_data['error_message'] = $response->get_error_message();
             $log_data['execution_time'] = $execution_time;
             $this->log_api_request($log_data);
@@ -479,82 +784,74 @@ class AI_Feedback_Analytics_API {
             return false;
         }
         
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        // Logování HTTP status kódu
+        $status_code = wp_remote_retrieve_response_code($response);
+        error_log('API RESPONSE CODE: ' . $status_code);
+        
+        // Podrobné logování odpovědi body
+        $response_body = wp_remote_retrieve_body($response);
+        error_log('API RESPONSE BODY: ' . $response_body);
+        
+        $body = json_decode($response_body, true);
         
         if (empty($body['choices'][0]['message']['content'])) {
             // Logování chyby
-            $log_data['error_message'] = 'Prázdná odpověď od API';
-            $log_data['response_data'] = json_encode($body);
+            $log_data['error_message'] = 'Prázdná odpověď od GPT API';
             $log_data['execution_time'] = $execution_time;
             $this->log_api_request($log_data);
-            
             return false;
         }
-        
-        // Extrakce a logování tokenů
-        $tokens_used = $body['usage']['total_tokens'] ?? 0;
-        
-        // Dekódování JSON odpovědi
-        $analysis_json = $body['choices'][0]['message']['content'];
-        $analysis_data = json_decode($analysis_json, true);
-        
-        if (empty($analysis_data) || !is_array($analysis_data)) {
-            // Logování chyby
-            $log_data['error_message'] = 'Neplatný JSON v odpovědi';
-            $log_data['response_data'] = $analysis_json;
-            $log_data['tokens_used'] = $tokens_used;
-            $log_data['execution_time'] = $execution_time;
-            $this->log_api_request($log_data);
-            
-            return false;
-        }
-        
+
+        // Extrakce odpovědi
+        $content = $body['choices'][0]['message']['content'];
+        $analysis_data = json_decode($content, true);
+
         // Logování úspěšného požadavku
-        $log_data['response_data'] = $analysis_json;
-        $log_data['tokens_used'] = $tokens_used;
         $log_data['execution_time'] = $execution_time;
+        $log_data['output_tokens'] = $this->estimate_tokens($content);
+        $log_data['total_tokens'] = $log_data['input_tokens'] + $log_data['output_tokens'];
         $this->log_api_request($log_data);
-        
-        return [
-            'data' => $analysis_data,
-            'tokens_used' => $tokens_used,
-            'execution_time' => $execution_time
-        ];
+
+        return $analysis_data;
     }
     
     /**
      * Logování API požadavku
      * 
      * @param array $log_data Data pro logování
+     * @return int ID logu
      */
     private function log_api_request($log_data) {
         global $wpdb;
         
+        $default_data = [
+            'request_type' => '',
+            'request_data' => '',
+            'response_data' => '',
+            'tokens_used' => 0,
+            'error_message' => '',
+            'execution_time' => 0
+        ];
+        
+        $log_data = wp_parse_args($log_data, $default_data);
+        
+        // Serializace dat
+        $log_data['request_data'] = is_array($log_data['request_data']) ? 
+            json_encode($log_data['request_data']) : 
+            $log_data['request_data'];
+            
+        $log_data['response_data'] = is_array($log_data['response_data']) ? 
+            json_encode($log_data['response_data']) : 
+            $log_data['response_data'];
+        
+        // Vložení logu do databáze
         $wpdb->insert(
             $this->log_table,
-            [
-                'request_type' => $log_data['request_type'],
-                'request_data' => $log_data['request_data'],
-                'response_data' => $log_data['response_data'] ?? null,
-                'tokens_used' => $log_data['tokens_used'] ?? null,
-                'error_message' => $log_data['error_message'] ?? null,
-                'execution_time' => $log_data['execution_time'] ?? null,
-                'created_at' => current_time('mysql')
-            ]
+            $log_data,
+            ['%s', '%s', '%s', '%d', '%s', '%f']
         );
         
-        // Pomocné logování do WP debug logu, pokud je povoleno
-        if (defined('WP_DEBUG') && WP_DEBUG === true) {
-            $log_message = sprintf(
-                '[AI Feedback Analytics] API Request: %s, Tokens: %s, Time: %.2f s, Error: %s',
-                $log_data['request_type'],
-                $log_data['tokens_used'] ?? 'N/A',
-                $log_data['execution_time'] ?? 0,
-                $log_data['error_message'] ?? 'None'
-            );
-            
-            error_log($log_message);
-        }
+        return $wpdb->insert_id;
     }
     
     /**
@@ -850,4 +1147,57 @@ class AI_Feedback_Analytics_API {
        </div>
        <?php
    }
+
+    /**
+     * Znovu analýza všech příspěvků
+     * 
+     * @return array Výsledky analýzy
+     */
+    public function reanalyze_all_posts() {
+        // Získání všech příspěvků
+        $args = [
+            'post_type' => ['reflexe', 'reference'],
+            'posts_per_page' => -1,
+            'post_status' => ['publish', 'draft'],
+        ];
+        
+        $posts = get_posts($args);
+        $results = [
+            'total' => count($posts),
+            'analyzed' => 0,
+            'errors' => 0,
+            'error_messages' => []
+        ];
+        
+        foreach ($posts as $post) {
+            try {
+                if ($post->post_type === 'reflexe') {
+                    // Analýza reflexí
+                    $entries = explode("---", $post->post_content);
+                    $entries = array_filter($entries, function($entry) {
+                        return trim($entry) !== '';
+                    });
+                    
+                    if (!empty($entries)) {
+                        $this->analyze_entries_with_gpt($entries, 'understanding');
+                        $this->analyze_entries_with_gpt($entries, 'topics');
+                        $results['analyzed']++;
+                    }
+                } else {
+                    // Analýza referencí
+                    $this->analyze_references_with_gpt([$post]);
+                    $results['analyzed']++;
+                }
+            } catch (Exception $e) {
+                $results['errors']++;
+                $results['error_messages'][] = sprintf(
+                    'Chyba při analýze příspěvku %d: %s',
+                    $post->ID,
+                    $e->getMessage()
+                );
+            }
+        }
+        
+        return $results;
+    }
 }

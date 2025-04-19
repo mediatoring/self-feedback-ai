@@ -23,6 +23,85 @@ jQuery(document).ready(function($) {
         $('#ai-feedback-filter-form').submit();
     });
     
+    // Tlačítko pro re-analýzu
+    $('#reanalyze-all').on('click', function() {
+        const button = $(this);
+        const progressBar = $('#reanalyze-progress');
+        const progressFill = $('.progress-bar-fill');
+        const progressStatus = $('.progress-status');
+        
+        // Zablokování tlačítka
+        button.prop('disabled', true);
+        
+        // Zobrazení progress baru
+        progressBar.show();
+        progressStatus.text('Zahajuji analýzu...');
+        progressFill.css('width', '0%');
+        
+        // Data pro AJAX požadavek
+        const ajaxData = {
+            action: 'reanalyze_all_posts',
+            nonce: aiFeedbackAnalytics.nonce
+        };
+        
+        console.log('Sending reanalyze request:', ajaxData);
+        console.log('AJAX URL:', aiFeedbackAnalytics.ajaxUrl);
+        
+        // AJAX požadavek na re-analýzu
+        $.ajax({
+            url: aiFeedbackAnalytics.ajaxUrl,
+            type: 'POST',
+            dataType: 'json',
+            data: ajaxData,
+            success: function(response) {
+                console.log('Reanalyze response:', response);
+                
+                if (response.success) {
+                    // Aktualizace progress baru
+                    progressFill.css('width', '100%');
+                    progressStatus.text('Analýza dokončena!');
+                    
+                    // Zobrazení notifikace o úspěchu
+                    showNotification(response.data.message || 'Re-analýza byla úspěšně dokončena.', 'success');
+                    
+                    // Obnovení stránky po 2 sekundách
+                    setTimeout(function() {
+                        location.reload();
+                    }, 2000);
+                } else {
+                    // Zobrazení chybové zprávy
+                    progressStatus.text('Chyba při analýze');
+                    showNotification(response.data || 'Chyba při re-analýze.', 'error');
+                }
+            },
+            error: function(xhr, status, error) {
+                console.error('Reanalyze AJAX error:', {
+                    status: status,
+                    error: error,
+                    response: xhr.responseText
+                });
+                
+                progressStatus.text('Chyba při komunikaci se serverem');
+                
+                let errorMessage = 'Chyba při komunikaci se serverem: ' + error;
+                try {
+                    const response = JSON.parse(xhr.responseText);
+                    if (response.data) {
+                        errorMessage = response.data;
+                    }
+                } catch (e) {
+                    console.error('Error parsing response:', e);
+                }
+                
+                showNotification(errorMessage, 'error');
+            },
+            complete: function() {
+                // Odblokování tlačítka
+                button.prop('disabled', false);
+            }
+        });
+    });
+    
     // Tlačítka pro analýzu dat
     $('.ai-analyze-button').on('click', function() {
         const analysisType = $(this).data('analysis');
@@ -35,19 +114,27 @@ jQuery(document).ready(function($) {
         // Zobrazení overlay
         $('#ai-analytics-overlay').show();
         
+        // Data pro AJAX požadavek
+        const ajaxData = {
+            action: 'analyze_feedback',
+            nonce: aiFeedbackAnalytics.nonce,
+            analysis_type: analysisType,
+            date_from: dateFrom,
+            date_to: dateTo,
+            keyword: keyword
+        };
+        
+        // Loguji přesně, co posíláme na server
+        console.log('AJAX request data:', ajaxData);
+        console.log('AJAX URL:', aiFeedbackAnalytics.ajaxUrl);
+        console.log('Nonce:', aiFeedbackAnalytics.nonce);
+        
         // AJAX požadavek na analýzu
         $.ajax({
             url: aiFeedbackAnalytics.ajaxUrl,
             type: 'POST',
             dataType: 'json',
-            data: {
-                action: 'ai_feedback_analyze',
-                nonce: aiFeedbackAnalytics.nonce,
-                analysis_type: analysisType,
-                date_from: dateFrom,
-                date_to: dateTo,
-                keyword: keyword
-            },
+            data: ajaxData,
             success: function(response) {
                 console.log('AJAX response:', response); // Debug výpis
                 
@@ -74,19 +161,31 @@ jQuery(document).ready(function($) {
                     // Zobrazení notifikace o úspěchu
                     showNotification('Analýza dokončena.', 'success');
                 } else {
-                    // Zobrazení chybové zprávy
-                    showNotification('Chyba při analýze: ' + (response.data || 'Neznámá chyba'), 'error');
+                    // Zobrazení detailní chybové zprávy
+                    let errorMessage = 'Chyba při analýze';
+                    
+                    if (response.data) {
+                        errorMessage = response.data;
+                    }
+                    
+                    // Podrobnější instrukce pro uživatele
+                    if (errorMessage.includes('API klíč')) {
+                        errorMessage += '. Zkontrolujte nastavení API klíče v nastavení pluginu.';
+                    } else if (errorMessage.includes('Neplatný API klíč')) {
+                        errorMessage += '. Zkontrolujte, zda je API klíč platný a má dostatečný kredit.';
+                    }
+                    
+                    showNotification(errorMessage, 'error');
+                    console.error('Chyba analýzy:', errorMessage);
                 }
             },
             error: function(xhr, status, error) {
-                // Skrytí overlay
+                console.error('AJAX Error:', {
+                    status: status,
+                    error: error,
+                    response: xhr.responseText
+                });
                 $('#ai-analytics-overlay').hide();
-                
-                // Výpis detailů chyby do konzole
-                console.error('AJAX error:', status, error);
-                console.log(xhr.responseText);
-                
-                // Zobrazení chybové zprávy
                 showNotification('Chyba při komunikaci se serverem: ' + error, 'error');
             }
         });
@@ -406,5 +505,41 @@ jQuery(document).ready(function($) {
         } else {
             $('#aspectsContainer').html('<p>Nejsou k dispozici žádné oceňované aspekty.</p>');
         }
+    }
+    
+    function displayAnalysisResults(data) {
+        const resultsContainer = document.getElementById('analysis-results');
+        if (!resultsContainer) return;
+        
+        // Vytvoření HTML struktury pro zobrazení výsledků
+        let html = `
+            <div class="analysis-summary">
+                <h3>Celkové shrnutí</h3>
+                <p>${data.summary}</p>
+            </div>
+            
+            <div class="analysis-section">
+                <h3>Klíčové poznatky</h3>
+                <ul>
+                    ${data.key_learnings.map(learning => `<li>${learning}</li>`).join('')}
+                </ul>
+            </div>
+            
+            <div class="analysis-section">
+                <h3>Porozumění</h3>
+                <ul>
+                    ${data.understanding.map(explanation => `<li>${explanation}</li>`).join('')}
+                </ul>
+            </div>
+            
+            <div class="analysis-section">
+                <h3>Plány využití</h3>
+                <ul>
+                    ${data.usage_plans.map(plan => `<li>${plan}</li>`).join('')}
+                </ul>
+            </div>
+        `;
+        
+        resultsContainer.innerHTML = html;
     }
 });

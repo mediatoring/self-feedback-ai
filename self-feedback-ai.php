@@ -1,12 +1,37 @@
 <?php
 /*
 Plugin Name: AI Feedback & Reference Plugin
-Description: Zápisník reflexí a referencí s využitím GPT-4.1. Nástroj pro osobní reflexi účastníků školení.
+Description: Zápisník reflexí a referencí s využitím GPT OpenAI API. Nástroj pro osobní reflexi účastníků školení.
 Version: 6.4
 Author: Michal Kubíček
 */
 
 defined('ABSPATH') || exit;
+
+// Inicializace session na začátku
+add_action('plugins_loaded', function() {
+    if (!session_id()) {
+        session_start();
+    }
+});
+
+// Načtení potřebných tříd
+require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-data.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-api.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-export.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-admin.php';
+require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-core.php';
+
+// Inicializace analytického modulu
+$analytics_core = AI_Feedback_Analytics_Core::get_instance();
+$analytics_core->init();
+
+// Inicializace tříd
+$data = new AI_Feedback_Analytics_Data();
+$api = new AI_Feedback_Analytics_API();
+$export = new AI_Feedback_Analytics_Export();
+$admin = AI_Feedback_Analytics_Admin::get_instance();
+$admin->init($data, $api, $export);
 
 // 1️⃣ CPT
 add_action('init', function() {
@@ -24,12 +49,56 @@ add_action('init', function() {
 
 // 2️⃣ Admin nastavení
 add_action('admin_menu', function() {
-    add_options_page('AI Plugin Settings', 'AI Plugin', 'manage_options', 'ai-plugin-settings', 'ai_plugin_settings_page');
+    // Přidání hlavního menu
+    add_menu_page(
+        'AI Feedback & Reference',
+        'AI Feedback',
+        'manage_options',
+        'ai-feedback-analytics',
+        [AI_Feedback_Analytics_Admin::get_instance(), 'render_analytics_page'],
+        'dashicons-feedback',
+        30
+    );
+
+    // Přidání podmenu pro nastavení
+    add_submenu_page(
+        'ai-feedback-analytics',
+        'Nastavení AI pluginu',
+        'Nastavení',
+        'manage_options',
+        'ai-plugin-settings',
+        'ai_plugin_settings_page'
+    );
+    
+    // Přidání podmenu pro logy
+    add_submenu_page(
+        'ai-feedback-analytics',
+        'Logy API požadavků',
+        'Logy',
+        'manage_options',
+        'ai-feedback-logs',
+        [AI_Feedback_Analytics_Admin::get_instance(), 'render_logs_page']
+    );
 });
+
 add_action('admin_init', function() {
     register_setting('ai_plugin_options', 'ai_plugin_apikey');
+    register_setting('ai_plugin_options', 'ai_plugin_model');
 });
+
 function ai_plugin_settings_page() {
+    $available_models = [
+        'gpt-4.1' => 'GPT-4.1 - Flagship model pro komplexní úkoly',
+        'gpt-4o' => 'GPT-4o - Rychlý, inteligentní, flexibilní model',
+        'gpt-4.1-mini' => 'GPT-4.1 mini - Vyvážený pro inteligenci, rychlost a cenu',
+        'gpt-4.1-nano' => 'GPT-4.1 nano - Nejrychlejší a nejekonomičtější model',
+        'o4-mini' => 'o4-mini - Rychlejší, dostupnější model pro uvažování',
+        'o3' => 'o3 - Nejmocnější model pro uvažování',
+        'o3-mini' => 'o3-mini - Menší alternativa k o3',
+        'o1' => 'o1 - Předchozí plný model pro uvažování',
+        'o1-mini' => 'o1-mini - Menší alternativa k o1',
+        'o1-pro' => 'o1-pro - Verze o1 s větším výpočetním výkonem'
+    ];
     ?>
     <div class="wrap">
         <h1>Nastavení AI pluginu</h1>
@@ -39,8 +108,25 @@ function ai_plugin_settings_page() {
             do_settings_sections('ai_plugin_settings');
             ?>
             <h2>API Klíč OpenAI</h2>
-            <p>Zadejte API klíč z OpenAI pro přístup k GPT-4.1</p>
+            <p>Zadejte API klíč z OpenAI pro přístup k GPT modelům</p>
             <input type="text" name="ai_plugin_apikey" value="<?php echo esc_attr(get_option('ai_plugin_apikey')); ?>" style="width: 400px;">
+
+            <h2>Výběr GPT modelu</h2>
+            <p>Vyberte model, který bude použit pro generování zpětné vazby a referencí</p>
+            <select name="ai_plugin_model" style="width: 400px;">
+                <?php
+                $current_model = get_option('ai_plugin_model', 'gpt-4.1');
+                foreach ($available_models as $value => $label) {
+                    printf(
+                        '<option value="%s" %s>%s</option>',
+                        esc_attr($value),
+                        selected($current_model, $value, false),
+                        esc_html($label)
+                    );
+                }
+                ?>
+            </select>
+
             <?php submit_button(); ?>
         </form>
     </div>
@@ -585,8 +671,6 @@ add_shortcode('self_feedback_form', function() {
 
 // 4️⃣ Zpracování dat
 add_action('init', function() {
-    if (!session_id()) session_start();
-
     if (isset($_POST['sf_create'])) {
         $email = sanitize_email($_POST['sf_email']);
         $post = get_page_by_title($email, OBJECT, 'reflexe');
@@ -792,13 +876,14 @@ add_action('init', function() {
 // 5️⃣ GPT API
 function ai_generate_summary($text) {
     $api_key = get_option('ai_plugin_apikey');
+    $model = get_option('ai_plugin_model', 'gpt-4.1');
     $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
         'headers' => [
             'Authorization' => 'Bearer ' . $api_key,
             'Content-Type' => 'application/json'
         ],
         'body' => json_encode([
-            'model' => 'gpt-4.1',
+            'model' => $model,
             'messages' => [
                 ['role' => 'system', 'content' => 'Shrň zápisky do hlavních bodů a navrhni další krok.'],
                 ['role' => 'user', 'content' => $text]
@@ -813,13 +898,14 @@ function ai_generate_summary($text) {
 // Funkce pro shrnutí jednoho zápisku
 function ai_generate_entry_summary($text) {
     $api_key = get_option('ai_plugin_apikey');
+    $model = get_option('ai_plugin_model', 'gpt-4.1');
     $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
         'headers' => [
             'Authorization' => 'Bearer ' . $api_key,
             'Content-Type' => 'application/json'
         ],
         'body' => json_encode([
-            'model' => 'gpt-4.1',
+            'model' => $model,
             'messages' => [
                 ['role' => 'system', 'content' => 'Poskytni strukturovanou zpětnou vazbu na tento zápisek ze školení. Zaměř se na tři oblasti: 1) jak konkrétní je plán účastníka, 2) zda rozumí tomu, co říká, 3) co mu v přemýšlení případně uniká. Tvým cílem je pomoci účastníkovi lépe reflektovat nabyté znalosti a jejich praktické využití.'],
                 ['role' => 'user', 'content' => $text]
@@ -833,6 +919,7 @@ function ai_generate_entry_summary($text) {
 
 function ai_generate_reference($a, $b, $c, $d, $context) {
     $api_key = get_option('ai_plugin_apikey');
+    $model = get_option('ai_plugin_model', 'gpt-4.1');
     $prompt = "Na základě odpovědí účastníka vytvoř citovatelnou referenci:\n\n1. Průběh: $a\n2. Ocenění: $b\n3. Využití: $c\n4. Doporučení: $d\n\nZápisky:\n$context";
     $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
         'headers' => [
@@ -840,7 +927,7 @@ function ai_generate_reference($a, $b, $c, $d, $context) {
             'Content-Type' => 'application/json'
         ],
         'body' => json_encode([
-            'model' => 'gpt-4.1',
+            'model' => $model,
             'messages' => [
                 ['role' => 'system', 'content' => 'Vytvoř lidsky znějící, stručnou, autentickou referenci na školení.'],
                 ['role' => 'user', 'content' => $prompt]
