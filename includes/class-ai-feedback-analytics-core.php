@@ -83,190 +83,182 @@ class AI_Feedback_Analytics_Core {
     
     /**
      * Handler pro AJAX požadavek na analýzu zpětné vazby
-     * 
-     * Zpracovává AJAX požadavek z JS kódu
      */
     public function handle_analyze_feedback() {
-        // Debugging - zapíše data požadavku do log souboru
-        error_log('DEBUG AJAX REQUEST: ' . print_r($_POST, true));
-        error_log('DEBUG SERVER: ' . print_r($_SERVER, true));
-        
-        // Kontrola nonce
-        if (!isset($_POST['nonce'])) {
-            error_log('NONCE MISSING');
-            wp_send_json_error('Chybí bezpečnostní token (nonce).');
-            return;
-        }
-        
-        // Kontrola nonce
-        if (!wp_verify_nonce($_POST['nonce'], 'ai_feedback_analytics_nonce')) {
-            error_log('INVALID NONCE: ' . $_POST['nonce']);
-            wp_send_json_error('Neplatný bezpečnostní token.');
-            return;
-        }
-        
-        // Kontrola oprávnění
-        if (!current_user_can('manage_options')) {
-            error_log('INSUFFICIENT PERMISSIONS');
-            wp_send_json_error('Nemáte dostatečná oprávnění.');
-            return;
-        }
-        
-        $this->handle_analyze_request();
-    }
-    
-    /**
-     * Zpracování AJAX požadavku na analýzu
-     */
-    private function handle_analyze_request() {
-        // Detailní logování všech vstupních parametrů
-        error_log('ANALYZE REQUEST PARAMETERS: ' . print_r($_POST, true));
-        error_log('SERVER REQUEST: ' . print_r($_SERVER, true));
-        
-        // Kontrola nonce - upravená pro lepší diagnostiku
-        if (!isset($_POST['nonce'])) {
-            error_log('NONCE MISSING');
-            wp_send_json_error('Chybí bezpečnostní token (nonce).');
-            return;
-        }
-        
-        // Kontrola nonce
-        $nonce_verification = wp_verify_nonce($_POST['nonce'], 'ai_feedback_analytics_nonce');
-        if ($nonce_verification === false) {
-            error_log('NONCE INVALID: ' . $_POST['nonce']);
-            wp_send_json_error('Neplatný bezpečnostní token. Zkuste obnovit stránku.');
-            return;
-        } else {
-            error_log('NONCE VERIFIED: ' . $nonce_verification);
-        }
-
-        // Kontrola oprávnění
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error('Nemáte dostatečná oprávnění.');
-            return;
-        }
-
-        $analysis_type = isset($_POST['analysis_type']) ? sanitize_text_field($_POST['analysis_type']) : '';
-        $date_from = isset($_POST['date_from']) ? sanitize_text_field($_POST['date_from']) : '';
-        $date_to = isset($_POST['date_to']) ? sanitize_text_field($_POST['date_to']) : '';
-        $keyword = isset($_POST['keyword']) ? sanitize_text_field($_POST['keyword']) : '';
-
-        // Kontrola API klíče před analýzou
-        if (empty(get_option('ai_plugin_apikey'))) {
-            wp_send_json_error('Chybí API klíč. Nastavte jej v nastavení pluginu.');
-            return;
-        }
-
-        // Zpracování podle typu analýzy
-        switch ($analysis_type) {
-            case 'activity_overview':
-                $data = $this->data->get_activity_data($date_from, $date_to, $keyword);
-                break;
-            case 'topics':
-                $entries = $this->data->get_entries_data($date_from, $date_to, $keyword);
-                
-                if (empty($entries)) {
-                    wp_send_json_error('Nebyla nalezena žádná data pro analýzu.');
-                    return;
-                }
-                
-                $result = $this->api->analyze_entries_with_gpt($entries, 'topics');
-                
-                if ($result === false) {
-                    global $wpdb;
-                    // Zjistím poslední chybu z logů
-                    $last_log = $wpdb->get_row(
-                        "SELECT * FROM {$wpdb->prefix}ai_feedback_api_logs 
-                        WHERE error_message != '' 
-                        ORDER BY id DESC 
-                        LIMIT 1",
-                        ARRAY_A
-                    );
-                    
-                    $error_message = 'Chyba při analýze.';
-                    
-                    if (!empty($last_log) && !empty($last_log['error_message'])) {
-                        $error_message .= ' ' . $last_log['error_message'];
-                    }
-                    
-                    wp_send_json_error($error_message);
-                    return;
-                }
-                
-                $data = $result['data'];
-                break;
-            case 'understanding':
-                $entries = $this->data->get_entries_data($date_from, $date_to, $keyword);
-                
-                if (empty($entries)) {
-                    wp_send_json_error('Nebyla nalezena žádná data pro analýzu porozumění.');
-                    return;
-                }
-                
-                $result = $this->api->analyze_entries_with_gpt($entries, 'understanding');
-                
-                if ($result === false) {
-                    global $wpdb;
-                    // Zjistím poslední chybu z logů
-                    $last_log = $wpdb->get_row(
-                        "SELECT * FROM {$wpdb->prefix}ai_feedback_api_logs 
-                        WHERE error_message != '' 
-                        ORDER BY id DESC 
-                        LIMIT 1",
-                        ARRAY_A
-                    );
-                    
-                    $error_message = 'Chyba při analýze porozumění.';
-                    
-                    if (!empty($last_log) && !empty($last_log['error_message'])) {
-                        $error_message .= ' ' . $last_log['error_message'];
-                    }
-                    
-                    wp_send_json_error($error_message);
-                    return;
-                }
-                
-                $data = $result['data'];
-                break;
-            case 'sentiment':
-                $references = $this->data->get_references_data($date_from, $date_to, $keyword);
-                
-                if (empty($references)) {
-                    wp_send_json_error('Nebyla nalezena žádná data pro analýzu sentimentu.');
-                    return;
-                }
-                
-                $result = $this->api->analyze_references_with_gpt($references);
-                
-                if ($result === false) {
-                    global $wpdb;
-                    // Zjistím poslední chybu z logů
-                    $last_log = $wpdb->get_row(
-                        "SELECT * FROM {$wpdb->prefix}ai_feedback_api_logs 
-                        WHERE error_message != '' 
-                        ORDER BY id DESC 
-                        LIMIT 1",
-                        ARRAY_A
-                    );
-                    
-                    $error_message = 'Chyba při analýze sentimentu.';
-                    
-                    if (!empty($last_log) && !empty($last_log['error_message'])) {
-                        $error_message .= ' ' . $last_log['error_message'];
-                    }
-                    
-                    wp_send_json_error($error_message);
-                    return;
-                }
-                
-                $data = $result;
-                break;
-            default:
-                wp_send_json_error('Neznámý typ analýzy.');
+        try {
+            error_log('AI Feedback Analytics: Začátek AJAX požadavku na analýzu');
+            error_log('POST data: ' . print_r($_POST, true));
+            
+            // Kontrola nonce
+            if (!isset($_POST['nonce'])) {
+                error_log('AI Feedback Analytics: Chybí nonce');
+                wp_send_json_error('Chybí bezpečnostní token.');
                 return;
-        }
+            }
+            
+            if (!wp_verify_nonce($_POST['nonce'], 'ai_feedback_analytics_nonce')) {
+                error_log('AI Feedback Analytics: Neplatný nonce');
+                wp_send_json_error('Neplatný bezpečnostní token.');
+                return;
+            }
+            
+            // Kontrola oprávnění
+            if (!current_user_can('manage_options')) {
+                error_log('AI Feedback Analytics: Nedostatečná oprávnění');
+                wp_send_json_error('Nemáte dostatečná oprávnění.');
+                return;
+            }
 
-        wp_send_json_success($data);
+            $analysis_type = isset($_POST['analysis_type']) ? sanitize_text_field($_POST['analysis_type']) : '';
+            $date_from = isset($_POST['date_from']) ? sanitize_text_field($_POST['date_from']) : '';
+            $date_to = isset($_POST['date_to']) ? sanitize_text_field($_POST['date_to']) : '';
+            $keyword = isset($_POST['keyword']) ? sanitize_text_field($_POST['keyword']) : '';
+
+            error_log('AI Feedback Analytics: Typ analýzy: ' . $analysis_type);
+            
+            // Zpracování podle typu analýzy
+            switch ($analysis_type) {
+                case 'activity_overview':
+                    error_log('AI Feedback Analytics: Získávání dat o aktivitě');
+                    $data = $this->data->get_activity_data($date_from, $date_to, $keyword);
+                    break;
+                    
+                case 'topics':
+                    error_log('AI Feedback Analytics: Získávání dat zápisků pro analýzu témat');
+                    $entries = $this->data->get_entries_data($date_from, $date_to, $keyword);
+                    
+                    if (empty($entries)) {
+                        error_log('AI Feedback Analytics: Žádná data pro analýzu');
+                        wp_send_json_error('Nebyla nalezena žádná data pro analýzu.');
+                        return;
+                    }
+                    
+                    error_log('AI Feedback Analytics: Počet zápisků pro analýzu témat: ' . count($entries));
+                    
+                    try {
+                        $result = $this->api->analyze_entries_with_gpt($entries, 'topics');
+                        error_log('AI Feedback Analytics: Výsledek analýzy témat: ' . print_r($result, true));
+                        
+                        if ($result === false) {
+                            error_log('AI Feedback Analytics: Analýza témat selhala');
+                            throw new Exception('Analýza témat selhala');
+                        }
+                        
+                        $data = $result['data'];
+                    } catch (Exception $e) {
+                        error_log('AI Feedback Analytics: Chyba při analýze témat: ' . $e->getMessage());
+                        wp_send_json_error('Chyba při analýze témat: ' . $e->getMessage());
+                        return;
+                    }
+                    break;
+                    
+                case 'understanding':
+                    error_log('AI Feedback Analytics: Získávání dat zápisků');
+                    $entries = $this->data->get_entries_data($date_from, $date_to, $keyword);
+                    
+                    if (empty($entries)) {
+                        error_log('AI Feedback Analytics: Žádná data pro analýzu');
+                        wp_send_json_error('Nebyla nalezena žádná data pro analýzu.');
+                        return;
+                    }
+                    
+                    error_log('AI Feedback Analytics: Počet zápisků pro analýzu: ' . count($entries));
+                    error_log('AI Feedback Analytics: Volání GPT analýzy');
+                    
+                    try {
+                        $result = $this->api->analyze_entries_with_gpt($entries, $analysis_type);
+                        error_log('AI Feedback Analytics: Výsledek GPT analýzy: ' . print_r($result, true));
+                        
+                        if ($result === false) {
+                            error_log('AI Feedback Analytics: GPT analýza selhala');
+                            throw new Exception('Analýza selhala');
+                        }
+                        
+                        $data = $result['data'];
+                    } catch (Exception $e) {
+                        error_log('AI Feedback Analytics: Chyba při GPT analýze: ' . $e->getMessage());
+                        error_log('AI Feedback Analytics: Stack trace: ' . $e->getTraceAsString());
+                        
+                        global $wpdb;
+                        $last_log = $wpdb->get_row(
+                            "SELECT * FROM {$wpdb->prefix}ai_feedback_api_logs 
+                            WHERE error_message != '' 
+                            ORDER BY id DESC 
+                            LIMIT 1",
+                            ARRAY_A
+                        );
+                        
+                        $error_message = 'Chyba při analýze.';
+                        if (!empty($last_log) && !empty($last_log['error_message'])) {
+                            $error_message .= ' ' . $last_log['error_message'];
+                        }
+                        
+                        wp_send_json_error($error_message);
+                        return;
+                    }
+                    break;
+                    
+                case 'sentiment':
+                    error_log('AI Feedback Analytics: Získávání dat referencí');
+                    $references = $this->data->get_references_data($date_from, $date_to, $keyword);
+                    
+                    if (empty($references)) {
+                        error_log('AI Feedback Analytics: Žádné reference pro analýzu');
+                        wp_send_json_error('Nebyla nalezena žádná data pro analýzu sentimentu.');
+                        return;
+                    }
+                    
+                    error_log('AI Feedback Analytics: Počet referencí pro analýzu: ' . count($references));
+                    error_log('AI Feedback Analytics: Volání GPT analýzy sentimentu');
+                    
+                    try {
+                        $result = $this->api->analyze_references_with_gpt($references);
+                        error_log('AI Feedback Analytics: Výsledek GPT analýzy sentimentu: ' . print_r($result, true));
+                        
+                        if ($result === false) {
+                            error_log('AI Feedback Analytics: GPT analýza sentimentu selhala');
+                            throw new Exception('Analýza sentimentu selhala');
+                        }
+                        
+                        $data = $result;
+                    } catch (Exception $e) {
+                        error_log('AI Feedback Analytics: Chyba při GPT analýze sentimentu: ' . $e->getMessage());
+                        error_log('AI Feedback Analytics: Stack trace: ' . $e->getTraceAsString());
+                        
+                        global $wpdb;
+                        $last_log = $wpdb->get_row(
+                            "SELECT * FROM {$wpdb->prefix}ai_feedback_api_logs 
+                            WHERE error_message != '' 
+                            ORDER BY id DESC 
+                            LIMIT 1",
+                            ARRAY_A
+                        );
+                        
+                        $error_message = 'Chyba při analýze sentimentu.';
+                        if (!empty($last_log) && !empty($last_log['error_message'])) {
+                            $error_message .= ' ' . $last_log['error_message'];
+                        }
+                        
+                        wp_send_json_error($error_message);
+                        return;
+                    }
+                    break;
+                    
+                default:
+                    error_log('AI Feedback Analytics: Neznámý typ analýzy: ' . $analysis_type);
+                    wp_send_json_error('Neznámý typ analýzy.');
+                    return;
+            }
+
+            error_log('AI Feedback Analytics: Odesílání úspěšné odpovědi');
+            error_log('AI Feedback Analytics: Data: ' . print_r($data, true));
+            wp_send_json_success($data);
+            
+        } catch (Exception $e) {
+            error_log('AI Feedback Analytics: Neočekávaná chyba: ' . $e->getMessage());
+            error_log('AI Feedback Analytics: Stack trace: ' . $e->getTraceAsString());
+            wp_send_json_error('Došlo k neočekávané chybě: ' . $e->getMessage());
+        }
     }
     
     /**
@@ -368,22 +360,43 @@ class AI_Feedback_Analytics_Core {
      * Handler pro získání detailů logu
      */
     public function handle_get_log_details() {
-        check_ajax_referer('ai_feedback_analytics_nonce', 'nonce');
-        
+        // Kontrola nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'ai_feedback_analytics_nonce')) {
+            wp_send_json_error(['message' => 'Neplatný bezpečnostní token.']);
+            return;
+        }
+
+        // Kontrola oprávnění
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Nemáte dostatečná oprávnění pro tuto akci.']);
+            wp_send_json_error(['message' => 'Nemáte dostatečná oprávnění.']);
+            return;
         }
-        
-        $log_id = intval($_POST['log_id']);
+
+        // Kontrola ID logu
+        $log_id = intval($_POST['log_id'] ?? 0);
         if (!$log_id) {
-            wp_send_json_error(['message' => 'Neplatné ID logu.']);
+            wp_send_json_error(['message' => 'Chybí ID logu.']);
+            return;
         }
-        
+
         try {
-            $log = $this->api->get_log_details($log_id);
+            global $wpdb;
+            $log = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT * FROM {$wpdb->prefix}ai_feedback_api_logs WHERE id = %d",
+                    $log_id
+                ),
+                ARRAY_A
+            );
+
+            if (!$log) {
+                wp_send_json_error(['message' => 'Log nebyl nalezen.']);
+                return;
+            }
+
             wp_send_json_success($log);
         } catch (Exception $e) {
-            wp_send_json_error(['message' => $e->getMessage()]);
+            wp_send_json_error(['message' => 'Chyba při načítání detailů logu: ' . $e->getMessage()]);
         }
     }
     
@@ -391,60 +404,75 @@ class AI_Feedback_Analytics_Core {
      * Handler pro AJAX požadavek na re-analýzu všech příspěvků
      */
     public function handle_reanalyze_all_posts() {
-        // Debugging - zapíše data požadavku do log souboru
-        error_log('DEBUG REANALYZE AJAX REQUEST: ' . print_r($_POST, true));
-        
-        // Kontrola nonce
-        if (!isset($_POST['nonce'])) {
-            error_log('REANALYZE NONCE MISSING');
-            wp_send_json_error('Chybí bezpečnostní token (nonce).');
-            return;
-        }
-        
-        // Kontrola nonce
-        if (!wp_verify_nonce($_POST['nonce'], 'ai_feedback_analytics_nonce')) {
-            error_log('REANALYZE INVALID NONCE: ' . $_POST['nonce']);
-            wp_send_json_error('Neplatný bezpečnostní token. Zkuste obnovit stránku.');
-            return;
-        }
-        
-        // Kontrola oprávnění
-        if (!current_user_can('manage_options')) {
-            error_log('REANALYZE INSUFFICIENT PERMISSIONS');
-            wp_send_json_error('Nemáte dostatečná oprávnění.');
-            return;
-        }
-        
-        // Kontrola API klíče
-        if (empty(get_option('ai_plugin_apikey'))) {
-            error_log('REANALYZE MISSING API KEY');
-            wp_send_json_error('Chybí API klíč. Nastavte jej v nastavení pluginu.');
-            return;
-        }
-        
         try {
-            // Spuštění re-analýzy
-            $results = $this->api->reanalyze_all_posts();
+            // Detailní logování požadavku
+            error_log('REANALYZE REQUEST START: ' . print_r($_POST, true));
+            error_log('REANALYZE SERVER: ' . print_r($_SERVER, true));
             
-            // Kontrola výsledků
-            if ($results['errors'] > 0) {
-                error_log('REANALYZE ERRORS: ' . print_r($results['error_messages'], true));
-                wp_send_json_error('Během re-analýzy došlo k chybám: ' . implode(', ', $results['error_messages']));
+            // Kontrola nonce
+            if (!isset($_POST['nonce'])) {
+                error_log('REANALYZE: Missing nonce');
+                wp_send_json_error(['message' => 'Chybí bezpečnostní token.']);
+                return;
+            }
+
+            if (!wp_verify_nonce($_POST['nonce'], 'ai_feedback_analytics_nonce')) {
+                error_log('REANALYZE: Invalid nonce: ' . $_POST['nonce']);
+                wp_send_json_error(['message' => 'Neplatný bezpečnostní token.']);
+                return;
+            }
+
+            // Kontrola oprávnění
+            if (!current_user_can('manage_options')) {
+                error_log('REANALYZE: Insufficient permissions');
+                wp_send_json_error(['message' => 'Nemáte dostatečná oprávnění pro tuto akci.']);
+                return;
+            }
+
+            // Kontrola instance API
+            if (!isset($this->api) || !is_object($this->api)) {
+                error_log('REANALYZE: API instance not available');
+                wp_send_json_error(['message' => 'Interní chyba: API instance není dostupná.']);
                 return;
             }
             
-            // Úspěšné dokončení
-            error_log('REANALYZE SUCCESS: ' . print_r($results, true));
-            wp_send_json_success([
-                'message' => sprintf(
-                    'Re-analýza dokončena. Zpracováno %d z %d příspěvků.',
-                    $results['analyzed'],
-                    $results['total']
-                )
-            ]);
+            // Kontrola API klíče
+            if (empty(get_option('ai_plugin_apikey'))) {
+                error_log('REANALYZE: Missing API key');
+                wp_send_json_error(['message' => 'Chybí API klíč. Nastavte jej v nastavení pluginu.']);
+                return;
+            }
+            
+            // Spuštění re-analýzy
+            $result = $this->api->reanalyze_all_posts();
+            error_log('REANALYZE RESULT: ' . print_r($result, true));
+            
+            if (!is_array($result)) {
+                wp_send_json_error(['message' => 'Neočekávaný formát odpovědi od API.']);
+                return;
+            }
+            
+            if (isset($result['success']) && $result['success']) {
+                wp_send_json_success([
+                    'message' => sprintf(
+                        'Re-analýza dokončena. Zpracováno %d příspěvků, %d chyb.',
+                        $result['total_posts'],
+                        $result['errors']
+                    ),
+                    'data' => $result
+                ]);
+            } else {
+                $error_message = isset($result['error_messages']) ? implode(', ', $result['error_messages']) : 'Neznámá chyba';
+                wp_send_json_error([
+                    'message' => 'Chyba při re-analýze: ' . $error_message
+                ]);
+            }
         } catch (Exception $e) {
-            error_log('REANALYZE EXCEPTION: ' . $e->getMessage());
-            wp_send_json_error('Chyba při re-analýze: ' . $e->getMessage());
+            error_log('REANALYZE ERROR: ' . $e->getMessage());
+            error_log('REANALYZE STACK TRACE: ' . $e->getTraceAsString());
+            wp_send_json_error([
+                'message' => 'Došlo k neočekávané chybě: ' . $e->getMessage()
+            ]);
         }
     }
 }

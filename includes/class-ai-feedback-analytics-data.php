@@ -21,24 +21,34 @@ class AI_Feedback_Analytics_Data {
      * @return array Statistiky
      */
     public function get_summary_statistics() {
+        error_log('AI Feedback Analytics: Načítání souhrnných statistik');
+        
         // Počet účastníků (unikátních reflexí)
         $total_participants = $this->count_posts('reflexe');
+        error_log('AI Feedback Analytics: Počet účastníků: ' . $total_participants);
         
         // Počet zápisků
         $total_entries = $this->count_entries();
+        error_log('AI Feedback Analytics: Počet zápisků: ' . $total_entries);
         
         // Průměr zápisků na účastníka
         $avg_entries = $total_participants > 0 ? round($total_entries / $total_participants, 1) : 0;
+        error_log('AI Feedback Analytics: Průměr zápisků na účastníka: ' . $avg_entries);
         
         // Počet referencí
         $total_references = $this->count_posts('reference');
+        error_log('AI Feedback Analytics: Počet referencí: ' . $total_references);
         
-        return [
+        $stats = [
             'total_participants' => $total_participants,
             'total_entries' => $total_entries,
             'avg_entries_per_participant' => $avg_entries,
             'total_references' => $total_references
         ];
+        
+        error_log('AI Feedback Analytics: Statistiky: ' . print_r($stats, true));
+        
+        return $stats;
     }
     
     /**
@@ -93,130 +103,118 @@ class AI_Feedback_Analytics_Data {
     }
     
     /**
-     * Získání dat o aktivitě pro graf
+     * Získání dat o aktivitě
      * 
-     * @param string $date_from Počáteční datum
-     * @param string $date_to Koncové datum
-     * @param string $keyword Klíčové slovo pro filtrování
-     * @return array Data pro graf aktivity
+     * @param string $date_from Datum od
+     * @param string $date_to Datum do
+     * @param string $keyword Klíčové slovo
+     * @return array Data o aktivitě
      */
     public function get_activity_data($date_from = '', $date_to = '', $keyword = '') {
-        // Nastavení filtrů pro dotaz
-        $args = [
-            'post_type' => 'reflexe',
-            'posts_per_page' => -1,
-            'post_status' => ['publish', 'draft'],
-        ];
+        global $wpdb;
         
-        // Přidání filtrů podle data
-        if (!empty($date_from) || !empty($date_to)) {
-            $args['date_query'] = [];
-            
-            if (!empty($date_from)) {
-                $args['date_query'][] = [
-                    'after' => $date_from,
-                    'inclusive' => true
-                ];
-            }
-            
-            if (!empty($date_to)) {
-                $args['date_query'][] = [
-                    'before' => $date_to,
-                    'inclusive' => true
-                ];
-            }
+        error_log('AI Feedback Analytics: Načítání dat o aktivitě');
+        error_log('Parametry: ' . print_r(['date_from' => $date_from, 'date_to' => $date_to, 'keyword' => $keyword], true));
+        
+        // Základní SQL pro získání dat
+        $sql_entries = "
+            SELECT DATE(post_date) as date, COUNT(*) as count
+            FROM {$wpdb->posts}
+            WHERE post_type = 'reflexe'
+            AND post_status = 'publish'
+        ";
+        
+        $sql_references = "
+            SELECT DATE(post_date) as date, COUNT(*) as count
+            FROM {$wpdb->posts}
+            WHERE post_type = 'reference'
+            AND post_status = 'publish'
+        ";
+        
+        // Přidání podmínek pro filtrování
+        $where_conditions = [];
+        $sql_params = [];
+        
+        if (!empty($date_from)) {
+            $where_conditions[] = "post_date >= %s";
+            $sql_params[] = $date_from;
         }
         
-        // Filtrování podle klíčového slova
+        if (!empty($date_to)) {
+            $where_conditions[] = "post_date <= %s";
+            $sql_params[] = $date_to;
+        }
+        
         if (!empty($keyword)) {
-            $args['s'] = $keyword;
+            $where_conditions[] = "(post_title LIKE %s OR post_content LIKE %s)";
+            $sql_params[] = '%' . $wpdb->esc_like($keyword) . '%';
+            $sql_params[] = '%' . $wpdb->esc_like($keyword) . '%';
         }
         
-        $posts = get_posts($args);
-        $entries_by_date = [];
-        
-        // Data aktivit podle data
-        foreach ($posts as $post) {
-            $post_date = get_the_date('Y-m-d', $post->ID);
-            
-            // Počítání zápisků v každém postu
-            $content = $post->post_content;
-            $entries = explode("---", $content);
-            $entries = array_filter($entries, function($entry) {
-                return trim($entry) !== '';
-            });
-            
-            if (!isset($entries_by_date[$post_date])) {
-                $entries_by_date[$post_date] = 0;
-            }
-            
-            $entries_by_date[$post_date] += count($entries);
+        // Přidání WHERE podmínek do SQL
+        if (!empty($where_conditions)) {
+            $sql_entries .= " AND " . implode(" AND ", $where_conditions);
+            $sql_references .= " AND " . implode(" AND ", $where_conditions);
         }
         
-        // Získání dat pro reference
-        $ref_args = [
-            'post_type' => 'reference',
-            'posts_per_page' => -1,
-            'post_status' => ['publish', 'draft'],
-        ];
+        // Dokončení SQL
+        $sql_entries .= " GROUP BY DATE(post_date) ORDER BY date ASC";
+        $sql_references .= " GROUP BY DATE(post_date) ORDER BY date ASC";
         
-        // Přidání filtrů podle data
-        if (!empty($date_from) || !empty($date_to)) {
-            $ref_args['date_query'] = [];
-            
-            if (!empty($date_from)) {
-                $ref_args['date_query'][] = [
-                    'after' => $date_from,
-                    'inclusive' => true
-                ];
-            }
-            
-            if (!empty($date_to)) {
-                $ref_args['date_query'][] = [
-                    'before' => $date_to,
-                    'inclusive' => true
-                ];
-            }
-        }
+        // Provedení dotazů
+        $entries_data = $wpdb->get_results($wpdb->prepare($sql_entries, $sql_params), ARRAY_A);
+        $references_data = $wpdb->get_results($wpdb->prepare($sql_references, $sql_params), ARRAY_A);
         
-        $references = get_posts($ref_args);
-        $refs_by_date = [];
+        error_log('SQL Entries: ' . $wpdb->last_query);
+        error_log('SQL References: ' . $wpdb->last_query);
         
-        foreach ($references as $ref) {
-            $ref_date = get_the_date('Y-m-d', $ref->ID);
-            
-            if (!isset($refs_by_date[$ref_date])) {
-                $refs_by_date[$ref_date] = 0;
-            }
-            
-            $refs_by_date[$ref_date]++;
-        }
+        // Zpracování výsledků
+        $dates = [];
+        $entries = [];
+        $references = [];
         
-        // Vytvoření kompletního seznamu dat
-        $all_dates = array_unique(array_merge(array_keys($entries_by_date), array_keys($refs_by_date)));
+        // Získání všech unikátních dat
+        $all_dates = array_unique(array_merge(
+            array_column($entries_data, 'date'),
+            array_column($references_data, 'date')
+        ));
         sort($all_dates);
         
-        $entries_data = [];
-        $refs_data = [];
-        
+        // Vytvoření pole s daty
         foreach ($all_dates as $date) {
-            $entries_data[] = $entries_by_date[$date] ?? 0;
-            $refs_data[] = $refs_by_date[$date] ?? 0;
+            $dates[] = date('d.m.Y', strtotime($date));
+            
+            // Počet zápisků pro datum
+            $entry_count = 0;
+            foreach ($entries_data as $entry) {
+                if ($entry['date'] === $date) {
+                    $entry_count = (int)$entry['count'];
+                    break;
+                }
+            }
+            $entries[] = $entry_count;
+            
+            // Počet referencí pro datum
+            $reference_count = 0;
+            foreach ($references_data as $reference) {
+                if ($reference['date'] === $date) {
+                    $reference_count = (int)$reference['count'];
+                    break;
+                }
+            }
+            $references[] = $reference_count;
         }
         
-        // Pokud nemáme žádná data, vrátíme testovací data
-        if (empty($all_dates)) {
-            return [
-                'labels' => ['2023-01-01', '2023-01-02', '2023-01-03', '2023-01-04', '2023-01-05'],
-                'entries' => [5, 7, 3, 8, 6],
-                'references' => [2, 0, 1, 3, 2]
-            ];
-        }
+        error_log('Výsledná data: ' . print_r([
+            'labels' => $dates,
+            'entries' => $entries,
+            'references' => $references
+        ], true));
         
         return [
-            'labels' => $all_dates,
-            'entries' => $entries_data,
-            'references' => $refs_data
+            'labels' => $dates,
+            'entries' => $entries,
+            'references' => $references
         ];
     }
     
@@ -536,5 +534,102 @@ class AI_Feedback_Analytics_Data {
         }
         
         return $export_data;
+    }
+    
+    /**
+     * Získání dat z logů pro nástěnku
+     * 
+     * @param string $date_from Datum od
+     * @param string $date_to Datum do
+     * @return array Data pro nástěnku
+     */
+    public function get_dashboard_data($date_from = '', $date_to = '') {
+        global $wpdb;
+        
+        $where = [];
+        $params = [];
+        
+        if (!empty($date_from)) {
+            $where[] = "created_at >= %s";
+            $params[] = $date_from;
+        }
+        
+        if (!empty($date_to)) {
+            $where[] = "created_at <= %s";
+            $params[] = $date_to;
+        }
+        
+        $where_sql = !empty($where) ? "WHERE " . implode(" AND ", $where) : "";
+        
+        // Získání posledních analýz z logů
+        $sql = $wpdb->prepare(
+            "SELECT response_data, created_at 
+            FROM {$wpdb->prefix}ai_feedback_api_logs 
+            {$where_sql}
+            WHERE request_type = 'analyze_single_entry'
+            AND response_data IS NOT NULL
+            AND error_message IS NULL
+            ORDER BY created_at DESC
+            LIMIT 50",
+            $params
+        );
+        
+        $logs = $wpdb->get_results($sql);
+        
+        // Zpracování dat pro grafy
+        $understanding_levels = [
+            'Výborné' => 0,
+            'Dobré' => 0,
+            'Základní' => 0,
+            'Nedostatečné' => 0
+        ];
+        
+        $topics = [];
+        $key_learnings = [];
+        $usage_plans = [];
+        
+        foreach ($logs as $log) {
+            $data = json_decode($log->response_data, true);
+            if (!$data) continue;
+            
+            // Zpracování klíčových poznatků
+            if (isset($data['key_learnings'])) {
+                foreach ($data['key_learnings'] as $learning) {
+                    if (!isset($key_learnings[$learning])) {
+                        $key_learnings[$learning] = 0;
+                    }
+                    $key_learnings[$learning]++;
+                }
+            }
+            
+            // Zpracování plánů využití
+            if (isset($data['usage_plans'])) {
+                foreach ($data['usage_plans'] as $plan) {
+                    if (!isset($usage_plans[$plan])) {
+                        $usage_plans[$plan] = 0;
+                    }
+                    $usage_plans[$plan]++;
+                }
+            }
+        }
+        
+        // Seřazení podle četnosti
+        arsort($key_learnings);
+        arsort($usage_plans);
+        
+        // Omezení na top N položek
+        $key_learnings = array_slice($key_learnings, 0, 10);
+        $usage_plans = array_slice($usage_plans, 0, 5);
+        
+        return [
+            'topics' => [
+                'labels' => array_keys($key_learnings),
+                'values' => array_values($key_learnings)
+            ],
+            'usage' => [
+                'labels' => array_keys($usage_plans),
+                'values' => array_values($usage_plans)
+            ]
+        ];
     }
 }

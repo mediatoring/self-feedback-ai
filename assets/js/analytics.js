@@ -23,85 +23,6 @@ jQuery(document).ready(function($) {
         $('#ai-feedback-filter-form').submit();
     });
     
-    // Tlačítko pro re-analýzu
-    $('#reanalyze-all').on('click', function() {
-        const button = $(this);
-        const progressBar = $('#reanalyze-progress');
-        const progressFill = $('.progress-bar-fill');
-        const progressStatus = $('.progress-status');
-        
-        // Zablokování tlačítka
-        button.prop('disabled', true);
-        
-        // Zobrazení progress baru
-        progressBar.show();
-        progressStatus.text('Zahajuji analýzu...');
-        progressFill.css('width', '0%');
-        
-        // Data pro AJAX požadavek
-        const ajaxData = {
-            action: 'reanalyze_all_posts',
-            nonce: aiFeedbackAnalytics.nonce
-        };
-        
-        console.log('Sending reanalyze request:', ajaxData);
-        console.log('AJAX URL:', aiFeedbackAnalytics.ajaxUrl);
-        
-        // AJAX požadavek na re-analýzu
-        $.ajax({
-            url: aiFeedbackAnalytics.ajaxUrl,
-            type: 'POST',
-            dataType: 'json',
-            data: ajaxData,
-            success: function(response) {
-                console.log('Reanalyze response:', response);
-                
-                if (response.success) {
-                    // Aktualizace progress baru
-                    progressFill.css('width', '100%');
-                    progressStatus.text('Analýza dokončena!');
-                    
-                    // Zobrazení notifikace o úspěchu
-                    showNotification(response.data.message || 'Re-analýza byla úspěšně dokončena.', 'success');
-                    
-                    // Obnovení stránky po 2 sekundách
-                    setTimeout(function() {
-                        location.reload();
-                    }, 2000);
-                } else {
-                    // Zobrazení chybové zprávy
-                    progressStatus.text('Chyba při analýze');
-                    showNotification(response.data || 'Chyba při re-analýze.', 'error');
-                }
-            },
-            error: function(xhr, status, error) {
-                console.error('Reanalyze AJAX error:', {
-                    status: status,
-                    error: error,
-                    response: xhr.responseText
-                });
-                
-                progressStatus.text('Chyba při komunikaci se serverem');
-                
-                let errorMessage = 'Chyba při komunikaci se serverem: ' + error;
-                try {
-                    const response = JSON.parse(xhr.responseText);
-                    if (response.data) {
-                        errorMessage = response.data;
-                    }
-                } catch (e) {
-                    console.error('Error parsing response:', e);
-                }
-                
-                showNotification(errorMessage, 'error');
-            },
-            complete: function() {
-                // Odblokování tlačítka
-                button.prop('disabled', false);
-            }
-        });
-    });
-    
     // Tlačítka pro analýzu dat
     $('.ai-analyze-button').on('click', function() {
         const analysisType = $(this).data('analysis');
@@ -109,7 +30,7 @@ jQuery(document).ready(function($) {
         const dateTo = $('#date_to').val();
         const keyword = $('#keyword').val();
         
-        console.log('Requesting analysis:', analysisType); // Debug výpis
+        console.log('Requesting analysis:', analysisType);
         
         // Zobrazení overlay
         $('#ai-analytics-overlay').show();
@@ -124,11 +45,6 @@ jQuery(document).ready(function($) {
             keyword: keyword
         };
         
-        // Loguji přesně, co posíláme na server
-        console.log('AJAX request data:', ajaxData);
-        console.log('AJAX URL:', aiFeedbackAnalytics.ajaxUrl);
-        console.log('Nonce:', aiFeedbackAnalytics.nonce);
-        
         // AJAX požadavek na analýzu
         $.ajax({
             url: aiFeedbackAnalytics.ajaxUrl,
@@ -136,7 +52,7 @@ jQuery(document).ready(function($) {
             dataType: 'json',
             data: ajaxData,
             success: function(response) {
-                console.log('AJAX response:', response); // Debug výpis
+                console.log('AJAX response:', response);
                 
                 // Skrytí overlay
                 $('#ai-analytics-overlay').hide();
@@ -158,17 +74,10 @@ jQuery(document).ready(function($) {
                             break;
                     }
                     
-                    // Zobrazení notifikace o úspěchu
                     showNotification('Analýza dokončena.', 'success');
                 } else {
-                    // Zobrazení detailní chybové zprávy
-                    let errorMessage = 'Chyba při analýze';
+                    let errorMessage = response.data || 'Chyba při analýze';
                     
-                    if (response.data) {
-                        errorMessage = response.data;
-                    }
-                    
-                    // Podrobnější instrukce pro uživatele
                     if (errorMessage.includes('API klíč')) {
                         errorMessage += '. Zkontrolujte nastavení API klíče v nastavení pluginu.';
                     } else if (errorMessage.includes('Neplatný API klíč')) {
@@ -176,7 +85,6 @@ jQuery(document).ready(function($) {
                     }
                     
                     showNotification(errorMessage, 'error');
-                    console.error('Chyba analýzy:', errorMessage);
                 }
             },
             error: function(xhr, status, error) {
@@ -201,7 +109,13 @@ jQuery(document).ready(function($) {
     
     // Funkce pro zobrazení notifikace
     function showNotification(message, type) {
-        const notification = $('.ai-feedback-notification');
+        // Vytvoření notifikace, pokud neexistuje
+        let notification = $('.ai-feedback-notification');
+        if (notification.length === 0) {
+            notification = $('<div class="ai-feedback-notification"></div>');
+            $('body').append(notification);
+        }
+        
         notification.text(message);
         notification.removeClass('success error');
         notification.addClass(type);
@@ -214,12 +128,16 @@ jQuery(document).ready(function($) {
     
     // Funkce pro vykreslení grafu aktivity
     function renderActivityChart(data) {
-        if (!data.labels || data.labels.length === 0) {
+        if (!data || !data.labels || data.labels.length === 0) {
             showNotification('Žádná data k zobrazení.', 'error');
             return;
         }
         
-        const ctx = document.getElementById('activityChart').getContext('2d');
+        const ctx = document.getElementById('activityChart');
+        if (!ctx) {
+            console.error('Canvas element not found');
+            return;
+        }
         
         // Zničení existujícího grafu, pokud existuje
         if (window.activityChart) {
@@ -270,180 +188,166 @@ jQuery(document).ready(function($) {
     
     // Funkce pro vykreslení grafů témat
     function renderTopicsCharts(data) {
-        // Kontrola, zda máme data
-        if (!data.keywords.labels || data.keywords.labels.length === 0) {
-            showNotification('Žádná data pro analýzu témat.', 'error');
+        if (!data || !data.response_data) {
+            showNotification('Nepodařilo se získat data pro analýzu témat.', 'error');
             return;
         }
         
-        // Skrytí placeholderů
-        $('#keywords-loading, #topics-loading, #usage-loading').hide();
-        
-        // Graf klíčových slov
-        const keywordsCtx = document.getElementById('keywordsChart').getContext('2d');
-        if (window.keywordsChart) {
-            window.keywordsChart.destroy();
-        }
-        window.keywordsChart = new Chart(keywordsCtx, {
-            type: 'bar',
-            data: {
-                labels: data.keywords.labels,
-                datasets: [{
-                    label: 'Četnost výskytu',
-                    data: data.keywords.values,
-                    backgroundColor: 'rgba(108, 92, 231, 0.8)'
-                }]
-            },
-            options: {
-                indexAxis: 'y',
-                responsive: true,
-                scales: {
-                    x: {
-                        beginAtZero: true,
-                        ticks: {
-                            precision: 0
+        try {
+            const responseData = JSON.parse(data.response_data);
+            
+            // Zobrazení souhrnu
+            if (responseData.summary) {
+                $('#topics-summary').html(`
+                    <div class="analysis-summary">
+                        <h3>Souhrn analýzy</h3>
+                        <p>${responseData.summary}</p>
+                    </div>
+                `);
+            }
+            
+            // Zpracování hlavních témat pro graf
+            if (responseData.main_topics && responseData.main_topics.length > 0) {
+                const labels = responseData.main_topics.map(topic => topic.name);
+                const values = responseData.main_topics.map(topic => topic.count);
+                
+                const ctx = document.getElementById('topicsChart').getContext('2d');
+                new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Četnost témat',
+                            data: values,
+                            backgroundColor: 'rgba(108, 92, 231, 0.6)',
+                            borderColor: 'rgba(108, 92, 231, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    stepSize: 1
+                                }
+                            }
                         }
                     }
-                }
+                });
             }
-        });
-        
-        // Graf kategorií témat
-        const topicsCtx = document.getElementById('topicsChart').getContext('2d');
-        if (window.topicsChart) {
-            window.topicsChart.destroy();
+            
+            // Zobrazení klíčových poznatků
+            if (responseData.key_learnings && responseData.key_learnings.length > 0) {
+                const learningsList = responseData.key_learnings.map(learning => 
+                    `<li>${learning}</li>`
+                ).join('');
+                
+                $('#key-learnings-list').html(`
+                    <div class="analysis-summary">
+                        <h3>Klíčové poznatky</h3>
+                        <ul class="key-learnings-list">
+                            ${learningsList}
+                        </ul>
+                    </div>
+                `);
+            }
+            
+        } catch (error) {
+            console.error('Chyba při zpracování dat z API:', error);
+            showNotification('Chyba při zpracování dat z API.', 'error');
         }
-        window.topicsChart = new Chart(topicsCtx, {
-            type: 'doughnut',
-            data: {
-                labels: data.topics.labels,
-                datasets: [{
-                    data: data.topics.values,
-                    backgroundColor: [
-                        'rgba(108, 92, 231, 0.8)',
-                        'rgba(116, 185, 255, 0.8)',
-                        'rgba(0, 184, 148, 0.8)',
-                        'rgba(253, 203, 110, 0.8)',
-                        'rgba(232, 67, 147, 0.8)',
-                        'rgba(153, 128, 250, 0.8)'
-                    ],
-                    hoverOffset: 10
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: {
-                    legend: {
-                        position: 'right'
-                    }
-                }
-            }
-        });
-        
-        // Graf plánů využití
-        const usageCtx = document.getElementById('usageChart').getContext('2d');
-        if (window.usageChart) {
-            window.usageChart.destroy();
-        }
-        window.usageChart = new Chart(usageCtx, {
-            type: 'polarArea',
-            data: {
-                labels: data.usage.labels,
-                datasets: [{
-                    data: data.usage.values,
-                    backgroundColor: [
-                        'rgba(108, 92, 231, 0.8)',
-                        'rgba(116, 185, 255, 0.8)',
-                        'rgba(0, 184, 148, 0.8)',
-                        'rgba(253, 203, 110, 0.8)',
-                        'rgba(232, 67, 147, 0.8)'
-                    ]
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: {
-                    legend: {
-                        position: 'right'
-                    }
-                }
-            }
-        });
     }
     
     // Funkce pro vykreslení grafů porozumění
     function renderUnderstandingCharts(data) {
-        // Kontrola, zda máme data
-        if (!data.understanding.labels || data.understanding.labels.length === 0) {
-            showNotification('Žádná data pro analýzu porozumění.', 'error');
+        if (!data || !data.response_data) {
+            showNotification('Nepodařilo se získat data pro analýzu porozumění.', 'error');
             return;
         }
         
-        // Skrytí placeholderů
-        $('#understanding-loading, #application-loading').hide();
-        
-        // Graf úrovní porozumění
-        const understandingCtx = document.getElementById('understandingChart').getContext('2d');
-        if (window.understandingChart) {
-            window.understandingChart.destroy();
-        }
-        window.understandingChart = new Chart(understandingCtx, {
-            type: 'pie',
-            data: {
-                labels: data.understanding.labels,
-                datasets: [{
-                    data: data.understanding.values,
-                    backgroundColor: [
-                        'rgba(0, 184, 148, 0.8)',
-                        'rgba(116, 185, 255, 0.8)',
-                        'rgba(253, 203, 110, 0.8)',
-                        'rgba(232, 67, 147, 0.8)'
-                    ],
-                    hoverOffset: 10
-                }]
-            },
-            options: {
-                responsive: true
-            }
-        });
-        
-        // Graf kvality praktických aplikací
-        const applicationCtx = document.getElementById('applicationChart').getContext('2d');
-        if (window.applicationChart) {
-            window.applicationChart.destroy();
-        }
-        window.applicationChart = new Chart(applicationCtx, {
-            type: 'pie',
-            data: {
-                labels: data.application.labels,
-                datasets: [{
-                    data: data.application.values,
-                    backgroundColor: [
-                        'rgba(0, 184, 148, 0.8)',
-                        'rgba(116, 185, 255, 0.8)',
-                        'rgba(253, 203, 110, 0.8)',
-                        'rgba(232, 67, 147, 0.8)'
-                    ],
-                    hoverOffset: 10
-                }]
-            },
-            options: {
-                responsive: true
-            }
-        });
-        
-        // Zobrazení doporučení pro zlepšení
-        const suggestions = data.suggestions;
-        if (suggestions && suggestions.length > 0) {
-            let suggestionsHtml = '<ul>';
-            suggestions.forEach(function(suggestion) {
-                suggestionsHtml += '<li>' + suggestion + '</li>';
-            });
-            suggestionsHtml += '</ul>';
+        try {
+            const responseData = JSON.parse(data.response_data);
             
-            $('#improvementSuggestions').html(suggestionsHtml);
-        } else {
-            $('#improvementSuggestions').html('<p>Nejsou k dispozici žádná doporučení.</p>');
+            // Graf úrovně porozumění
+            if (responseData.understanding_levels) {
+                const understandingCtx = document.getElementById('understandingChart').getContext('2d');
+                new Chart(understandingCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: Object.keys(responseData.understanding_levels),
+                        datasets: [{
+                            data: Object.values(responseData.understanding_levels),
+                            backgroundColor: [
+                                'rgba(108, 92, 231, 0.6)',
+                                'rgba(46, 213, 115, 0.6)',
+                                'rgba(255, 71, 87, 0.6)'
+                            ],
+                            borderColor: [
+                                'rgba(108, 92, 231, 1)',
+                                'rgba(46, 213, 115, 1)',
+                                'rgba(255, 71, 87, 1)'
+                            ],
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'bottom'
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Graf kvality aplikace
+            if (responseData.application_quality) {
+                const applicationCtx = document.getElementById('applicationChart').getContext('2d');
+                new Chart(applicationCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: Object.keys(responseData.application_quality),
+                        datasets: [{
+                            label: 'Kvalita aplikace znalostí',
+                            data: Object.values(responseData.application_quality),
+                            backgroundColor: 'rgba(46, 213, 115, 0.6)',
+                            borderColor: 'rgba(46, 213, 115, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    stepSize: 1
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Zobrazení doporučení pro zlepšení
+            if (responseData.improvement_suggestions && responseData.improvement_suggestions.length > 0) {
+                const suggestionsList = responseData.improvement_suggestions.map(suggestion => 
+                    `<li>${suggestion}</li>`
+                ).join('');
+                
+                $('#improvementSuggestions').html(`
+                    <ul class="improvement-suggestions-list">
+                        ${suggestionsList}
+                    </ul>
+                `);
+            }
+            
+        } catch (error) {
+            console.error('Chyba při zpracování dat z API:', error);
+            showNotification('Chyba při zpracování dat z API.', 'error');
         }
     }
     
@@ -542,4 +446,94 @@ jQuery(document).ready(function($) {
         
         resultsContainer.innerHTML = html;
     }
+    
+    // Automatické načtení dat při načtení stránky
+    function loadInitialData() {
+        const dateFrom = $('#date_from').val();
+        const dateTo = $('#date_to').val();
+        const keyword = $('#keyword').val();
+        
+        // Načtení souhrnných statistik
+        $.ajax({
+            url: aiFeedbackAnalytics.ajaxUrl,
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'analyze_feedback',
+                nonce: aiFeedbackAnalytics.nonce,
+                analysis_type: 'activity_overview',
+                date_from: dateFrom,
+                date_to: dateTo,
+                keyword: keyword
+            },
+            success: function(response) {
+                if (response.success) {
+                    renderActivityChart(response.data);
+                }
+            }
+        });
+        
+        // Načtení analýzy témat
+        $.ajax({
+            url: aiFeedbackAnalytics.ajaxUrl,
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'analyze_feedback',
+                nonce: aiFeedbackAnalytics.nonce,
+                analysis_type: 'topics',
+                date_from: dateFrom,
+                date_to: dateTo,
+                keyword: keyword
+            },
+            success: function(response) {
+                if (response.success) {
+                    renderTopicsCharts(response.data);
+                }
+            }
+        });
+        
+        // Načtení analýzy porozumění
+        $.ajax({
+            url: aiFeedbackAnalytics.ajaxUrl,
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'analyze_feedback',
+                nonce: aiFeedbackAnalytics.nonce,
+                analysis_type: 'understanding',
+                date_from: dateFrom,
+                date_to: dateTo,
+                keyword: keyword
+            },
+            success: function(response) {
+                if (response.success) {
+                    renderUnderstandingCharts(response.data);
+                }
+            }
+        });
+        
+        // Načtení analýzy sentimentu
+        $.ajax({
+            url: aiFeedbackAnalytics.ajaxUrl,
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'analyze_feedback',
+                nonce: aiFeedbackAnalytics.nonce,
+                analysis_type: 'sentiment',
+                date_from: dateFrom,
+                date_to: dateTo,
+                keyword: keyword
+            },
+            success: function(response) {
+                if (response.success) {
+                    renderSentimentChart(response.data);
+                }
+            }
+        });
+    }
+    
+    // Načtení dat při prvním zobrazení stránky
+    loadInitialData();
 });

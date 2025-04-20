@@ -2,7 +2,7 @@
 /*
 Plugin Name: AI Feedback & Reference Plugin
 Description: Zápisník reflexí a referencí s využitím GPT OpenAI API. Nástroj pro osobní reflexi účastníků školení.
-Version: 6.4
+Version: 6.5
 Author: Michal Kubíček
 */
 
@@ -22,6 +22,11 @@ require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-e
 require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-admin.php';
 require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-core.php';
 
+// Načtení CLI třídy pokud je dostupné WP-CLI
+if (defined('WP_CLI') && WP_CLI) {
+    require_once plugin_dir_path(__FILE__) . 'includes/class-ai-feedback-analytics-cli.php';
+}
+
 // Inicializace analytického modulu
 $analytics_core = AI_Feedback_Analytics_Core::get_instance();
 $analytics_core->init();
@@ -32,6 +37,39 @@ $api = new AI_Feedback_Analytics_API();
 $export = new AI_Feedback_Analytics_Export();
 $admin = AI_Feedback_Analytics_Admin::get_instance();
 $admin->init($data, $api, $export);
+
+// Hook pro automatickou analýzu při vytvoření/aktualizaci reflexe
+add_action('save_post_reflexe', function($post_id, $post, $update) {
+    // Pokud se jedná o autosave, přeskočíme
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+        return;
+    }
+
+    // Pokud nemáme oprávnění k editaci
+    if (!current_user_can('edit_post', $post_id)) {
+        return;
+    }
+
+    // Pokud je post ve stavu 'auto-draft' nebo 'trash', přeskočíme
+    if (in_array($post->post_status, ['auto-draft', 'trash'])) {
+        return;
+    }
+
+    // Získání instance API třídy
+    $api = new AI_Feedback_Analytics_API();
+    
+    // Analýza reflexe
+    $analysis = $api->analyze_single_entry($post_id, $post->post_content);
+    
+    if ($analysis) {
+        // Přidání notifikace do admin rozhraní
+        add_action('admin_notices', function() {
+            echo '<div class="notice notice-success is-dismissible">';
+            echo '<p>Reflexe byla úspěšně analyzována pomocí AI.</p>';
+            echo '</div>';
+        });
+    }
+}, 10, 3);
 
 // 1️⃣ CPT
 add_action('init', function() {
@@ -86,19 +124,24 @@ add_action('admin_init', function() {
     register_setting('ai_plugin_options', 'ai_plugin_model');
 });
 
+// Definice dostupných modelů jako konstanty
+define('AI_FEEDBACK_AVAILABLE_MODELS', [
+    'gpt-4o' => 'GPT-4o - Rychlý, inteligentní, flexibilní model',
+    'gpt-4.1-mini' => 'GPT-4.1 mini - Vyvážený pro inteligenci, rychlost a cenu',
+    'gpt-4.1-nano' => 'GPT-4.1 nano - Nejrychlejší a nejekonomičtější model',
+    'o4-mini' => 'o4-mini - Rychlejší, dostupnější model pro uvažování',
+    'o3' => 'o3 - Nejmocnější model pro uvažování',
+    'o3-mini' => 'o3-mini - Menší alternativa k o3',
+    'o1' => 'o1 - Předchozí plný model pro uvažování',
+    'o1-mini' => 'o1-mini - Menší alternativa k o1',
+    'o1-pro' => 'o1-pro - Verze o1 s větším výpočetním výkonem'
+]);
+
+// Výchozí model jako konstanta
+define('AI_FEEDBACK_DEFAULT_MODEL', 'gpt-4o');
+
 function ai_plugin_settings_page() {
-    $available_models = [
-        'gpt-4.1' => 'GPT-4.1 - Flagship model pro komplexní úkoly',
-        'gpt-4o' => 'GPT-4o - Rychlý, inteligentní, flexibilní model',
-        'gpt-4.1-mini' => 'GPT-4.1 mini - Vyvážený pro inteligenci, rychlost a cenu',
-        'gpt-4.1-nano' => 'GPT-4.1 nano - Nejrychlejší a nejekonomičtější model',
-        'o4-mini' => 'o4-mini - Rychlejší, dostupnější model pro uvažování',
-        'o3' => 'o3 - Nejmocnější model pro uvažování',
-        'o3-mini' => 'o3-mini - Menší alternativa k o3',
-        'o1' => 'o1 - Předchozí plný model pro uvažování',
-        'o1-mini' => 'o1-mini - Menší alternativa k o1',
-        'o1-pro' => 'o1-pro - Verze o1 s větším výpočetním výkonem'
-    ];
+    $available_models = AI_FEEDBACK_AVAILABLE_MODELS;
     ?>
     <div class="wrap">
         <h1>Nastavení AI pluginu</h1>
@@ -115,7 +158,7 @@ function ai_plugin_settings_page() {
             <p>Vyberte model, který bude použit pro generování zpětné vazby a referencí</p>
             <select name="ai_plugin_model" style="width: 400px;">
                 <?php
-                $current_model = get_option('ai_plugin_model', 'gpt-4.1');
+                $current_model = get_option('ai_plugin_model', AI_FEEDBACK_DEFAULT_MODEL);
                 foreach ($available_models as $value => $label) {
                     printf(
                         '<option value="%s" %s>%s</option>',
@@ -154,16 +197,361 @@ add_shortcode('self_feedback_form', function() {
                 <?php if (!$post_id): ?>
                     <!-- Formulář pro začátek zápisníku -->
                     <div class="sf-entry-form sf-start-form">
-                        <h3>Začít nový zápisník</h3>
-                        <p>Zadejte svůj e-mail, kam vám budou zaslány vaše zápisky po dokončení.</p>
-                        <input type="email" name="sf_email" placeholder="Zadejte e-mail" required>
-                        <button type="submit" name="sf_create" class="sf-button sf-button-primary">Začít zápisník</button>
+                        <h3>Začněte svůj zápisník ze školení</h3>
+                        <p>Váš zápisník vám pomůže zachytit klíčové poznatky ze školení a získat personalizovanou AI zpětnou vazbu. Na konci vám bude zaslán e-mailem kompletní přehled vašeho učení.</p>
+                        <input type="email" name="sf_email" placeholder="Váš e-mail pro zaslání zápisků" required>
+                        <button type="submit" name="sf_create" class="sf-button sf-button-primary">Vytvořit zápisník</button>
                     </div>
+                
+                    <!-- Formulář pro přidání nového zápisku -->
+                    <div class="sf-entry-form sf-new-entry">
+                        <h3>Váš zápisník ze školení</h3>
+                        <p>Každý zápisek by se měl týkat jednoho tématu nebo poznatku. Po uložení zápisku dostanete okamžitou AI zpětnou vazbu, která vám pomůže lépe pochopit a využít nové znalosti.</p>
+                        <div class="sf-input-group">
+                            <label for="sf-nove">Co nového jste se naučili?</label>
+                            <p class="sf-help-text">Popište konkrétní znalost, dovednost nebo koncept, který pro vás byl nový nebo zajímavý.</p>
+                            <textarea id="sf-nove" name="sf_nove" placeholder="Například: Naučil/a jsem se, jak efektivně používat metodu XYZ pro..."></textarea>
+                        </div>
+                        <div class="sf-input-group">
+                            <label for="sf-explain">Jak byste to vysvětlili kolegovi?</label>
+                            <p class="sf-help-text">Vysvětlení vlastními slovy vám pomůže lépe pochopit téma a upevnit znalosti.</p>
+                            <textarea id="sf-explain" name="sf_explain" placeholder="Například: Představ si, že... Funguje to tak, že..."></textarea>
+                        </div>
+                        <div class="sf-input-group">
+                            <label for="sf-use">Kde a jak to využijete v praxi?</label>
+                            <p class="sf-help-text">Popište konkrétní situaci nebo projekt, kde novou znalost využijete.</p>
+                            <textarea id="sf-use" name="sf_use" placeholder="Například: Tuto metodu použiji příští týden při..."></textarea>
+                        </div>
+                        <div class="sf-button-container">
+                            <button type="submit" name="sf_add_entry" class="sf-button sf-button-primary">
+                                <span class="button-icon">+</span> Uložit zápisek a získat AI zpětnou vazbu
+                            </button>
+                            <button type="submit" name="sf_send" class="sf-button sf-button-secondary">
+                                <span class="button-icon">✉</span> Dokončit a poslat na e-mail
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Historie zápisků -->
+                    <div class="sf-entries-history">
+                        <h3>Vaše zápisky s AI zpětnou vazbou</h3>
+                        <p>Zde vidíte vaše zápisky spolu s personalizovanou AI analýzou vašeho učení.</p>
+                        <?php 
+                        // Získání obsahu a rozdělení na jednotlivé zápisky
+                        $content = $post->post_content;
+                        $entries = explode("---", $content);
+                        $summaries = explode("\n\n", $summary);
+                        
+                        // Odstranění prázdných záznamů
+                        $entries = array_filter($entries, function($entry) {
+                            return trim($entry) !== '';
+                        });
+                        
+                        // Zobrazení zápisků od nejnovějšího
+                        $entries = array_reverse($entries);
+                        $summaries = array_reverse($summaries);
+                        
+                        if (empty($entries)): 
+                        ?>
+                            <div class="sf-no-entries">
+                                <p>Zatím nemáte žádné zápisky. Začněte vytvořením prvního zápisku pomocí formuláře výše.</p>
+                            </div>
+                        <?php
+                        else:
+                            foreach ($entries as $index => $entry): 
+                                $entry_summary = isset($summaries[$index]) ? $summaries[$index] : '';
+                                $entry_lines = explode("\n", trim($entry));
+                                $entry_data = [
+                                    'nove' => '',
+                                    'explain' => '',
+                                    'use' => ''
+                                ];
+                                
+                                $current_section = '';
+                                
+                                foreach ($entry_lines as $line) {
+                                    $line = trim($line);
+                                    if (empty($line)) continue;
+                                    
+                                    // Kontrola starého formátu
+                                    if (strpos($line, 'Co nového:') === 0) {
+                                        $entry_data['nove'] = ltrim(trim(substr($line, 11)), ': ');
+                                    } elseif (strpos($line, 'Jak vysvětlit:') === 0) {
+                                        $entry_data['explain'] = ltrim(trim(substr($line, 14)), ': ');
+                                    } elseif (strpos($line, 'Využití:') === 0) {
+                                        $entry_data['use'] = ltrim(trim(substr($line, 9)), ': ');
+                                    }
+                                    // Kontrola nového formátu
+                                    elseif ($line === '#nove') {
+                                        $current_section = 'nove';
+                                    } elseif ($line === '#explain') {
+                                        $current_section = 'explain';
+                                    } elseif ($line === '#use') {
+                                        $current_section = 'use';
+                                    }
+                                    // Přidání obsahu do aktuální sekce
+                                    elseif ($current_section) {
+                                        $line = ltrim($line, ': '); // Odstranění případné úvodní dvojtečky
+                                        if (empty($entry_data[$current_section])) {
+                                            $entry_data[$current_section] = $line;
+                                        } else {
+                                            $entry_data[$current_section] .= "\n" . $line;
+                                        }
+                                    }
+                                }
+                        ?>
+                            <div class="sf-entry-box">
+                                <div class="sf-entry-content">
+                                    <?php if (!empty($entry_data['nove'])): ?>
+                                        <?php 
+                                        // Parsování JSON zpětné vazby
+                                        $ai_feedback = null;
+                                        if (!empty($entry_summary)) {
+                                            try {
+                                                $ai_feedback = json_decode($entry_summary, true);
+                                            } catch (Exception $e) {
+                                                error_log('Chyba při parsování JSON zpětné vazby: ' . $e->getMessage());
+                                            }
+                                        }
+                                        ?>
+                                        <?php if ($ai_feedback && !empty($ai_feedback['tema'])): ?>
+                                            <div class="sf-entry-tema">
+                                                <?php echo esc_html($ai_feedback['tema']); ?>
+                                            </div>
+                                        <?php endif; ?>
+                                        <div class="sf-entry-item">
+                                            <span class="sf-entry-label">Nová znalost</span>
+                                            <p><?php echo nl2br(esc_html($entry_data['nove'])); ?></p>
+                                        </div>
+                                    <?php endif; ?>
+                                    
+                                    <?php if (!empty($entry_data['explain'])): ?>
+                                        <div class="sf-entry-item">
+                                            <span class="sf-entry-label">Vlastní vysvětlení</span>
+                                            <p><?php echo nl2br(esc_html($entry_data['explain'])); ?></p>
+                                        </div>
+                                    <?php endif; ?>
+                                    
+                                    <?php if (!empty($entry_data['use'])): ?>
+                                        <div class="sf-entry-item">
+                                            <span class="sf-entry-label">Praktické využití</span>
+                                            <p><?php echo nl2br(esc_html($entry_data['use'])); ?></p>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                                
+                                <?php if (!empty($entry_summary)): ?>
+                                    <div class="sf-entry-summary">
+                                        <span class="sf-summary-label">AI zpětná vazba</span>
+                                        <div class="sf-summary-content">
+                                            <?php
+                                            if ($ai_feedback) {
+                                                // Formátování strukturované zpětné vazby
+                                                if (!empty($ai_feedback['shrnuti'])) {
+                                                    echo nl2br(esc_html($ai_feedback['shrnuti'])) . "\n\n";
+                                                }
+                                                
+                                                if (!empty($ai_feedback['konkretnost'])) {
+                                                    echo "Konkrétnost plánu: " . esc_html($ai_feedback['konkretnost']['hodnoceni']) . "\n";
+                                                    echo esc_html($ai_feedback['konkretnost']['komentar']) . "\n\n";
+                                                }
+                                                
+                                                if (!empty($ai_feedback['porozumeni'])) {
+                                                    echo "Úroveň porozumění: " . esc_html($ai_feedback['porozumeni']['hodnoceni']) . "\n";
+                                                    echo esc_html($ai_feedback['porozumeni']['komentar']) . "\n\n";
+                                                }
+                                                
+                                                if (!empty($ai_feedback['doporuceni'])) {
+                                                    echo "Doporučení pro zlepšení:\n";
+                                                    foreach ($ai_feedback['doporuceni'] as $doporuceni) {
+                                                        echo "• " . esc_html($doporuceni) . "\n";
+                                                    }
+                                                }
+                                            } else {
+                                                // Pokud není JSON formát, zobrazíme původní text
+                                                echo nl2br(esc_html($entry_summary));
+                                            }
+                                            ?>
+                                        </div>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        <?php 
+                            endforeach;
+                        endif;
+                        ?>
+                    </div>
+
+                    <style>
+                        /* Základní styly pro formulář */
+                        .sf-help-text {
+                            color: #666;
+                            font-size: 0.9em;
+                            margin: 2px 0 8px;
+                            font-style: italic;
+                        }
+                        
+                        .sf-input-group {
+                            margin-bottom: 20px;
+                        }
+                        
+                        .sf-input-group label {
+                            font-weight: 600;
+                            display: block;
+                            margin-bottom: 5px;
+                            color: #2c3338;
+                        }
+                        
+                        .sf-input-group textarea {
+                            width: 100%;
+                            min-height: 100px;
+                            padding: 12px;
+                            border: 1px solid #ddd;
+                            border-radius: 6px;
+                            font-size: 14px;
+                            line-height: 1.6;
+                            transition: all 0.3s ease;
+                        }
+                        
+                        .sf-input-group textarea:focus {
+                            border-color: #6c5ce7;
+                            box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.1);
+                            outline: none;
+                        }
+                        
+                        /* Styly pro historii zápisků */
+                        .sf-entries-history {
+                            margin-top: 40px;
+                        }
+                        
+                        .sf-entry-box {
+                            background: white;
+                            border-radius: 12px;
+                            margin-bottom: 25px;
+                            overflow: hidden;
+                            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+                            border: 1px solid #eee;
+                        }
+                        
+                        .sf-entry-content {
+                            padding: 20px;
+                        }
+                        
+                        .sf-entry-item {
+                            margin-bottom: 20px;
+                            padding-bottom: 20px;
+                            border-bottom: 1px solid #f0f0f0;
+                        }
+                        
+                        .sf-entry-item:last-child {
+                            margin-bottom: 0;
+                            padding-bottom: 0;
+                            border-bottom: none;
+                        }
+                        
+                        .sf-entry-label {
+                            display: inline-block;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: #6c5ce7;
+                            background: rgba(108, 92, 231, 0.1);
+                            padding: 4px 12px;
+                            border-radius: 20px;
+                            margin-bottom: 8px;
+                        }
+                        
+                        .sf-entry-item p {
+                            margin: 0;
+                            color: #2c3338;
+                            line-height: 1.6;
+                            font-size: 15px;
+                        }
+                        
+                        .sf-entry-summary {
+                            background: #f8f9ff;
+                            padding: 20px;
+                            border-top: 1px solid #eef0ff;
+                        }
+                        
+                        .sf-summary-label {
+                            display: inline-block;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: #6c5ce7;
+                            margin-bottom: 12px;
+                            background: white;
+                            padding: 4px 12px;
+                            border-radius: 20px;
+                            box-shadow: 0 2px 4px rgba(108, 92, 231, 0.1);
+                        }
+                        
+                        .sf-summary-content {
+                            color: #2c3338;
+                            line-height: 1.6;
+                            font-size: 15px;
+                            white-space: pre-line;
+                        }
+                        
+                        .sf-no-entries {
+                            background: #f9f9f9;
+                            padding: 30px;
+                            border-radius: 12px;
+                            text-align: center;
+                            color: #666;
+                            border: 2px dashed #eee;
+                        }
+                        
+                        /* Styly pro tlačítka */
+                        .sf-button-container {
+                            display: flex;
+                            gap: 12px;
+                            margin-top: 25px;
+                        }
+                        
+                        .sf-button {
+                            padding: 12px 24px;
+                            border: none;
+                            border-radius: 6px;
+                            cursor: pointer;
+                            font-weight: 600;
+                            font-size: 14px;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            transition: all 0.2s ease;
+                        }
+                        
+                        .sf-button-primary {
+                            background: #6c5ce7;
+                            color: white;
+                        }
+                        
+                        .sf-button-primary:hover {
+                            background: #5649c0;
+                            transform: translateY(-1px);
+                        }
+                        
+                        .sf-button-secondary {
+                            background: #f8f9fa;
+                            color: #2c3338;
+                            border: 1px solid #ddd;
+                        }
+                        
+                        .sf-button-secondary:hover {
+                            background: #f0f0f0;
+                            transform: translateY(-1px);
+                        }
+                        
+                        .button-icon {
+                            font-size: 18px;
+                            line-height: 1;
+                        }
+                    </style>
                 <?php else: ?>
                     <!-- Formulář pro přidání nového zápisku -->
                     <div class="sf-entry-form sf-new-entry">
-                        <h3>Nový zápisek</h3>
-                        <p>Zaznamenávejte si své myšlenky a reflexe ze školení.</p>
+                        <h3>Zápisník ze školení</h3>
+                        <p>Zaznamenávejte si své myšlenky a reflexe ze školení. Jeden zápisek = jedno téma.</p>
                         <div class="sf-input-group">
                             <label for="sf-nove">Co nového jste se naučili?</label>
                             <textarea id="sf-nove" name="sf_nove" placeholder="Popište nové znalosti nebo dovednosti, které jste získali"></textarea>
@@ -188,8 +576,8 @@ add_shortcode('self_feedback_form', function() {
                     
                     <!-- Historie zápisků -->
                     <div class="sf-entries-history">
-                        <h3>Vaše zápisky</h3>
-                        <p>Přehled vašich zápisků s AI zpětnou vazbou</p>
+                        <h3>Vaše zápisky s AI zpětnou vazbou</h3>
+                        <p>Zde vidíte vaše zápisky spolu s personalizovanou AI analýzou vašeho učení.</p>
                         <?php 
                         // Získání obsahu a rozdělení na jednotlivé zápisky
                         $content = $post->post_content;
@@ -215,46 +603,118 @@ add_shortcode('self_feedback_form', function() {
                             foreach ($entries as $index => $entry): 
                                 $entry_summary = isset($summaries[$index]) ? $summaries[$index] : '';
                                 $entry_lines = explode("\n", trim($entry));
-                                $entry_data = [];
+                                $entry_data = [
+                                    'nove' => '',
+                                    'explain' => '',
+                                    'use' => ''
+                                ];
+                                
+                                $current_section = '';
                                 
                                 foreach ($entry_lines as $line) {
+                                    $line = trim($line);
+                                    if (empty($line)) continue;
+                                    
+                                    // Kontrola starého formátu
                                     if (strpos($line, 'Co nového:') === 0) {
-                                        $entry_data['nove'] = trim(substr($line, 11));
+                                        $entry_data['nove'] = ltrim(trim(substr($line, 11)), ': ');
                                     } elseif (strpos($line, 'Jak vysvětlit:') === 0) {
-                                        $entry_data['explain'] = trim(substr($line, 14));
+                                        $entry_data['explain'] = ltrim(trim(substr($line, 14)), ': ');
                                     } elseif (strpos($line, 'Využití:') === 0) {
-                                        $entry_data['use'] = trim(substr($line, 9));
+                                        $entry_data['use'] = ltrim(trim(substr($line, 9)), ': ');
+                                    }
+                                    // Kontrola nového formátu
+                                    elseif ($line === '#nove') {
+                                        $current_section = 'nove';
+                                    } elseif ($line === '#explain') {
+                                        $current_section = 'explain';
+                                    } elseif ($line === '#use') {
+                                        $current_section = 'use';
+                                    }
+                                    // Přidání obsahu do aktuální sekce
+                                    elseif ($current_section) {
+                                        $line = ltrim($line, ': '); // Odstranění případné úvodní dvojtečky
+                                        if (empty($entry_data[$current_section])) {
+                                            $entry_data[$current_section] = $line;
+                                        } else {
+                                            $entry_data[$current_section] .= "\n" . $line;
+                                        }
                                     }
                                 }
                         ?>
                             <div class="sf-entry-box">
                                 <div class="sf-entry-content">
                                     <?php if (!empty($entry_data['nove'])): ?>
+                                        <?php 
+                                        // Parsování JSON zpětné vazby
+                                        $ai_feedback = null;
+                                        if (!empty($entry_summary)) {
+                                            try {
+                                                $ai_feedback = json_decode($entry_summary, true);
+                                            } catch (Exception $e) {
+                                                error_log('Chyba při parsování JSON zpětné vazby: ' . $e->getMessage());
+                                            }
+                                        }
+                                        ?>
+                                        <?php if ($ai_feedback && !empty($ai_feedback['tema'])): ?>
+                                            <div class="sf-entry-tema">
+                                                <?php echo esc_html($ai_feedback['tema']); ?>
+                                            </div>
+                                        <?php endif; ?>
                                         <div class="sf-entry-item">
-                                            <h4>Co nového:</h4>
-                                            <p><?php echo esc_html($entry_data['nove']); ?></p>
+                                            <span class="sf-entry-label">Nová znalost</span>
+                                            <p><?php echo nl2br(esc_html($entry_data['nove'])); ?></p>
                                         </div>
                                     <?php endif; ?>
                                     
                                     <?php if (!empty($entry_data['explain'])): ?>
                                         <div class="sf-entry-item">
-                                            <h4>Jak vysvětlit:</h4>
-                                            <p><?php echo esc_html($entry_data['explain']); ?></p>
+                                            <span class="sf-entry-label">Vlastní vysvětlení</span>
+                                            <p><?php echo nl2br(esc_html($entry_data['explain'])); ?></p>
                                         </div>
                                     <?php endif; ?>
                                     
                                     <?php if (!empty($entry_data['use'])): ?>
                                         <div class="sf-entry-item">
-                                            <h4>Využití:</h4>
-                                            <p><?php echo esc_html($entry_data['use']); ?></p>
+                                            <span class="sf-entry-label">Praktické využití</span>
+                                            <p><?php echo nl2br(esc_html($entry_data['use'])); ?></p>
                                         </div>
                                     <?php endif; ?>
                                 </div>
                                 
                                 <?php if (!empty($entry_summary)): ?>
                                     <div class="sf-entry-summary">
-                                        <h4>AI zpětná vazba:</h4>
-                                        <div class="sf-summary-content"><?php echo nl2br(esc_html($entry_summary)); ?></div>
+                                        <span class="sf-summary-label">AI zpětná vazba</span>
+                                        <div class="sf-summary-content">
+                                            <?php
+                                            if ($ai_feedback) {
+                                                // Formátování strukturované zpětné vazby
+                                                if (!empty($ai_feedback['shrnuti'])) {
+                                                    echo nl2br(esc_html($ai_feedback['shrnuti'])) . "\n\n";
+                                                }
+                                                
+                                                if (!empty($ai_feedback['konkretnost'])) {
+                                                    echo "Konkrétnost plánu: " . esc_html($ai_feedback['konkretnost']['hodnoceni']) . "\n";
+                                                    echo esc_html($ai_feedback['konkretnost']['komentar']) . "\n\n";
+                                                }
+                                                
+                                                if (!empty($ai_feedback['porozumeni'])) {
+                                                    echo "Úroveň porozumění: " . esc_html($ai_feedback['porozumeni']['hodnoceni']) . "\n";
+                                                    echo esc_html($ai_feedback['porozumeni']['komentar']) . "\n\n";
+                                                }
+                                                
+                                                if (!empty($ai_feedback['doporuceni'])) {
+                                                    echo "Doporučení pro zlepšení:\n";
+                                                    foreach ($ai_feedback['doporuceni'] as $doporuceni) {
+                                                        echo "• " . esc_html($doporuceni) . "\n";
+                                                    }
+                                                }
+                                            } else {
+                                                // Pokud není JSON formát, zobrazíme původní text
+                                                echo nl2br(esc_html($entry_summary));
+                                            }
+                                            ?>
+                                        </div>
                                     </div>
                                 <?php endif; ?>
                             </div>
@@ -575,6 +1035,17 @@ add_shortcode('self_feedback_form', function() {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        .sf-entry-tema {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #6c5ce7;
+            margin-bottom: 15px;
+            padding: 8px 15px;
+            background: rgba(108, 92, 231, 0.1);
+            border-radius: 20px;
+            display: inline-block;
+        }
     </style>
 
     <script>
@@ -684,10 +1155,20 @@ add_action('init', function() {
         $id = $_SESSION['reflexe_id'];
         $content = get_post_field('post_content', $id);
         
-        // Vytvoření nového zápisku
-        $zapis = "\n\n---\n\nCo nového: " . sanitize_textarea_field($_POST['sf_nove']);
-        $zapis .= "\nJak vysvětlit: " . sanitize_textarea_field($_POST['sf_explain']);
-        $zapis .= "\nVyužití: " . sanitize_textarea_field($_POST['sf_use']);
+        // Odstranění případných dvojteček ze vstupních dat
+        $nove = sanitize_textarea_field($_POST['sf_nove']);
+        $explain = sanitize_textarea_field($_POST['sf_explain']);
+        $use = sanitize_textarea_field($_POST['sf_use']);
+        
+        // Odstranění úvodní dvojtečky, pokud existuje
+        $nove = ltrim($nove, ': ');
+        $explain = ltrim($explain, ': ');
+        $use = ltrim($use, ': ');
+        
+        // Vytvoření nového zápisku - bez dvojteček v textu
+        $zapis = "\n\n---\n\n#nove\n" . $nove;
+        $zapis .= "\n#explain\n" . $explain;
+        $zapis .= "\n#use\n" . $use;
         
         // Přidáme současný zápisek do obsahu
         $new_content = $content . $zapis;
@@ -764,14 +1245,36 @@ add_action('init', function() {
             $entry_summary = isset($summaries[$index]) ? $summaries[$index] : '';
             $entry_lines = explode("\n", trim($entry));
             $entry_data = [];
+            $current_section = '';
             
             foreach ($entry_lines as $line) {
+                $line = trim($line);
+                if (empty($line)) continue;
+                
+                // Kontrola starého formátu
                 if (strpos($line, 'Co nového:') === 0) {
-                    $entry_data['nove'] = trim(substr($line, 11));
+                    $entry_data['nove'] = ltrim(trim(substr($line, 11)), ': ');
                 } elseif (strpos($line, 'Jak vysvětlit:') === 0) {
-                    $entry_data['explain'] = trim(substr($line, 14));
+                    $entry_data['explain'] = ltrim(trim(substr($line, 14)), ': ');
                 } elseif (strpos($line, 'Využití:') === 0) {
-                    $entry_data['use'] = trim(substr($line, 9));
+                    $entry_data['use'] = ltrim(trim(substr($line, 9)), ': ');
+                }
+                // Kontrola nového formátu
+                elseif ($line === '#nove') {
+                    $current_section = 'nove';
+                } elseif ($line === '#explain') {
+                    $current_section = 'explain';
+                } elseif ($line === '#use') {
+                    $current_section = 'use';
+                }
+                // Přidání obsahu do aktuální sekce
+                elseif ($current_section) {
+                    $line = ltrim($line, ': '); // Odstranění případné úvodní dvojtečky
+                    if (empty($entry_data[$current_section])) {
+                        $entry_data[$current_section] = $line;
+                    } else {
+                        $entry_data[$current_section] .= "\n" . $line;
+                    }
                 }
             }
             
@@ -779,21 +1282,21 @@ add_action('init', function() {
             
             if (!empty($entry_data['nove'])) {
                 $emailHtml .= '<div class="entry-item">
-                    <h3>Co nového:</h3>
+                    <h3>Co jsem se naučil/a:</h3>
                     <p>' . esc_html($entry_data['nove']) . '</p>
                 </div>';
             }
             
             if (!empty($entry_data['explain'])) {
                 $emailHtml .= '<div class="entry-item">
-                    <h3>Jak vysvětlit:</h3>
+                    <h3>Jak tomu rozumím:</h3>
                     <p>' . esc_html($entry_data['explain']) . '</p>
                 </div>';
             }
             
             if (!empty($entry_data['use'])) {
                 $emailHtml .= '<div class="entry-item">
-                    <h3>Využití:</h3>
+                    <h3>Jak to využiji:</h3>
                     <p>' . esc_html($entry_data['use']) . '</p>
                 </div>';
             }
@@ -876,7 +1379,7 @@ add_action('init', function() {
 // 5️⃣ GPT API
 function ai_generate_summary($text) {
     $api_key = get_option('ai_plugin_apikey');
-    $model = get_option('ai_plugin_model', 'gpt-4.1');
+    $model = get_option('ai_plugin_model', AI_FEEDBACK_DEFAULT_MODEL);
     $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
         'headers' => [
             'Authorization' => 'Bearer ' . $api_key,
@@ -888,7 +1391,7 @@ function ai_generate_summary($text) {
                 ['role' => 'system', 'content' => 'Shrň zápisky do hlavních bodů a navrhni další krok.'],
                 ['role' => 'user', 'content' => $text]
             ],
-            'max_tokens' => 400
+            'max_tokens' => 1500
         ])
     ]);
     $body = json_decode(wp_remote_retrieve_body($response), true);
@@ -898,7 +1401,7 @@ function ai_generate_summary($text) {
 // Funkce pro shrnutí jednoho zápisku
 function ai_generate_entry_summary($text) {
     $api_key = get_option('ai_plugin_apikey');
-    $model = get_option('ai_plugin_model', 'gpt-4.1');
+    $model = get_option('ai_plugin_model', AI_FEEDBACK_DEFAULT_MODEL);
     $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
         'headers' => [
             'Authorization' => 'Bearer ' . $api_key,
@@ -907,19 +1410,78 @@ function ai_generate_entry_summary($text) {
         'body' => json_encode([
             'model' => $model,
             'messages' => [
-                ['role' => 'system', 'content' => 'Poskytni strukturovanou zpětnou vazbu na tento zápisek ze školení. Zaměř se na tři oblasti: 1) jak konkrétní je plán účastníka, 2) zda rozumí tomu, co říká, 3) co mu v přemýšlení případně uniká. Tvým cílem je pomoci účastníkovi lépe reflektovat nabyté znalosti a jejich praktické využití.'],
+                ['role' => 'system', 'content' => 'Poskytni strukturovanou zpětnou vazbu na tento zápisek ze školení. Zaměř se na tři oblasti a vrať odpověď v následujícím JSON formátu:
+
+{
+    "tema": "Název tématu zápisku (např. \'Prompting\' pro zápisky o promptech a instrukcích pro AI, \'Vektorizace\' pro zápisky o převodu na vektory, atd.). Téma by mělo být jedno až dvouslovné a vystihovat hlavní koncept zápisku.",
+    "konkretnost": {
+        "hodnoceni": "vysoká/střední/nízká",
+        "komentar": "Vysvětlení hodnocení konkrétnosti plánu"
+    },
+    "porozumeni": {
+        "hodnoceni": "výborné/dobré/částečné/nedostatečné",
+        "komentar": "Vysvětlení úrovně porozumění"
+    },
+    "doporuceni": [
+        "První doporučení pro zlepšení",
+        "Druhé doporučení pro zlepšení"
+    ],
+    "shrnuti": "Celkové shrnutí zpětné vazby"
+}'],
                 ['role' => 'user', 'content' => $text]
             ],
-            'max_tokens' => 250
+            'max_tokens' => 1500,
+            'response_format' => ['type' => 'json_object']
         ])
     ]);
+    
     $body = json_decode(wp_remote_retrieve_body($response), true);
-    return $body['choices'][0]['message']['content'] ?? '';
+    $content = $body['choices'][0]['message']['content'] ?? '';
+    
+    try {
+        $feedback = json_decode($content, true);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            // Formátování odpovědi do čitelného formátu
+            $output = "";
+            
+            // Shrnutí
+            if (!empty($feedback['shrnuti'])) {
+                $output .= $feedback['shrnuti'] . "\n\n";
+            }
+            
+            // Konkrétnost plánu
+            if (!empty($feedback['konkretnost'])) {
+                $output .= "Konkrétnost plánu: " . $feedback['konkretnost']['hodnoceni'] . "\n";
+                $output .= $feedback['konkretnost']['komentar'] . "\n\n";
+            }
+            
+            // Úroveň porozumění
+            if (!empty($feedback['porozumeni'])) {
+                $output .= "Úroveň porozumění: " . $feedback['porozumeni']['hodnoceni'] . "\n";
+                $output .= $feedback['porozumeni']['komentar'] . "\n\n";
+            }
+            
+            // Doporučení
+            if (!empty($feedback['doporuceni'])) {
+                $output .= "Doporučení pro zlepšení:\n";
+                foreach ($feedback['doporuceni'] as $doporuceni) {
+                    $output .= "• " . $doporuceni . "\n";
+                }
+            }
+            
+            return $output;
+        }
+    } catch (Exception $e) {
+        error_log('Chyba při parsování JSON odpovědi: ' . $e->getMessage());
+    }
+    
+    // Pokud se nepodaří zparsovat JSON, vrátíme původní text
+    return $content;
 }
 
 function ai_generate_reference($a, $b, $c, $d, $context) {
     $api_key = get_option('ai_plugin_apikey');
-    $model = get_option('ai_plugin_model', 'gpt-4.1');
+    $model = get_option('ai_plugin_model', AI_FEEDBACK_DEFAULT_MODEL);
     $prompt = "Na základě odpovědí účastníka vytvoř citovatelnou referenci:\n\n1. Průběh: $a\n2. Ocenění: $b\n3. Využití: $c\n4. Doporučení: $d\n\nZápisky:\n$context";
     $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
         'headers' => [
@@ -929,15 +1491,47 @@ function ai_generate_reference($a, $b, $c, $d, $context) {
         'body' => json_encode([
             'model' => $model,
             'messages' => [
-                ['role' => 'system', 'content' => 'Vytvoř lidsky znějící, stručnou, autentickou referenci na školení.'],
+                ['role' => 'system', 'content' => 'Vytvoř lidsky znějící, autentickou referenci na školení.'],
                 ['role' => 'user', 'content' => $prompt]
             ],
-            'max_tokens' => 500
+            'max_tokens' => 1500
         ])
     ]);
     $body = json_decode(wp_remote_retrieve_body($response), true);
     return $body['choices'][0]['message']['content'] ?? '';
 }
 
-// Načtení analytického modulu
-require_once plugin_dir_path(__FILE__) . 'ai-feedback-analytics.php';
+// Registrace aktivačního hooku
+register_activation_hook(__FILE__, 'ai_feedback_activate');
+
+function ai_feedback_activate() {
+    global $wpdb;
+    
+    // Vytvoření tabulky pro logy
+    $table_name = $wpdb->prefix . 'ai_feedback_api_logs';
+    $charset_collate = $wpdb->get_charset_collate();
+    
+    $sql = "CREATE TABLE IF NOT EXISTS $table_name (
+        id bigint(20) NOT NULL AUTO_INCREMENT,
+        request_type varchar(50) NOT NULL,
+        request_data longtext NOT NULL,
+        response_data longtext,
+        tokens_used int(11),
+        error_message text,
+        execution_time float,
+        created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY  (id)
+    ) $charset_collate;";
+    
+    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+    dbDelta($sql);
+    
+    // Kontrola, zda byla tabulka vytvořena
+    if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") != $table_name) {
+        error_log('AI Feedback Analytics: Chyba při vytváření tabulky ' . $table_name);
+        error_log('SQL: ' . $sql);
+        error_log('Poslední DB chyba: ' . $wpdb->last_error);
+    } else {
+        error_log('AI Feedback Analytics: Tabulka ' . $table_name . ' byla úspěšně vytvořena');
+    }
+}
